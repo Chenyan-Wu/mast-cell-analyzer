@@ -184,22 +184,16 @@ if app_mode == "Standardized Protocol (IgE/SP)":
 
             if st.button("🚀 Run Standard Analysis"):
                 
-               # Helper to plot standardize mode
+                # Helper to plot standardize mode
                 def plot_std_category(df, dose_col, donor_list, cat_name, unit):
                     fig = go.Figure()
                     res = []
-                    
                     for d in donor_list:
                         target_cols = d['ige_cols'] if cat_name == "Anti-IgE" else d['sp_cols']
                         
                         if dose_col not in df.columns: continue
 
                         doses = df[dose_col]
-                        
-                        # Use a flag to ensure we only show the legend ONCE per donor
-                        # This prevents the legend from saying "Donor A IgE, Donor A IgE, Donor A IgE"
-                        show_legend_for_donor = True
-                        
                         for col in target_cols:
                             resp = df[col]
                             popt, ec25, ec50, ec90, r2, status = calculate_metrics(doses, resp)
@@ -227,33 +221,21 @@ if app_mode == "Standardized Protocol (IgE/SP)":
                                 y_plot = r_plot[mask]
                                 if max(y_plot) <= 1.0: y_plot = y_plot * 100
                                 
-                                # Points (No legend for dots)
                                 fig.add_trace(go.Scatter(
                                     x=x_plot_raw, y=y_plot, 
                                     mode='markers', marker=dict(color=d['color']), 
                                     showlegend=False
                                 ))
                                 
-                                # Fit Line
                                 x_min, x_max = min(x_plot_raw), max(x_plot_raw)
                                 x_smooth = np.logspace(np.log10(x_min), np.log10(x_max), 100)
                                 y_smooth = four_param_logistic(np.log10(x_smooth), *popt)
                                 
-                                # CLEAN LEGEND NAME
-                                # e.g. "Donor_1 Anti-IgE"
-                                legend_name = f"{d['name']} {cat_name}"
-                                
                                 fig.add_trace(go.Scatter(
                                     x=x_smooth, y=y_smooth, 
-                                    mode='lines', 
-                                    name=legend_name, 
-                                    line=dict(color=d['color']),
-                                    showlegend=show_legend_for_donor, # Only show label for first line
-                                    legendgroup=d['name'] # Group all lines for this donor together
+                                    mode='lines', name=f"{d['name']} {col}", 
+                                    line=dict(color=d['color'])
                                 ))
-                                
-                                # Turn off legend for subsequent lines of the same donor
-                                show_legend_for_donor = False
                     
                     fig.update_layout(title=f"{cat_name}", xaxis_title=f"Dose ({unit})", yaxis_title="Degranulation %", xaxis_type="log", height=450)
                     return pd.DataFrame(res), fig
