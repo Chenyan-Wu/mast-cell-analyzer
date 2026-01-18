@@ -1,21 +1,23 @@
 import streamlit as st
 
-# --- PAGE SETUP ---
-st.set_page_config(page_title="Mast Cell Dual-Assay Analyzer", layout="wide")
+# --- PAGE CONFIG ---
+st.set_page_config(page_title="Mast Cell Analytics Suite", layout="wide", page_icon="🧬")
 
 import pandas as pd
 import numpy as np
 from scipy.optimize import curve_fit
 import plotly.graph_objects as go
 from datetime import date
+import base64
 
-# --- 1. ROBUST MATH ENGINE ---
+# ==========================================
+#        SHARED MATH ENGINE (The Core)
+# ==========================================
+
 def four_param_logistic(x, min_val, max_val, ec50, hill_slope):
-    # Hill equation
     return min_val + (max_val - min_val) / (1 + (x / ec50)**(-hill_slope))
 
 def get_r_squared(y_true, y_pred):
-    # Calculate R2
     residuals = y_true - y_pred
     ss_res = np.sum(residuals**2)
     ss_tot = np.sum((y_true - np.mean(y_true))**2)
@@ -23,36 +25,33 @@ def get_r_squared(y_true, y_pred):
 
 def calculate_metrics(doses, responses):
     try:
-        # DATA CLEANING: Handle European commas (e.g. "0,5" -> 0.5)
+        # 1. SCRUBBER: Handle commas and % signs
         if isinstance(doses, pd.Series) and doses.dtype == object:
-             doses = doses.astype(str).str.replace(',', '.', regex=False)
+             doses = doses.astype(str).str.replace(',', '.', regex=False).str.replace('%', '', regex=False)
         if isinstance(responses, pd.Series) and responses.dtype == object:
-             responses = responses.astype(str).str.replace(',', '.', regex=False)
+             responses = responses.astype(str).str.replace(',', '.', regex=False).str.replace('%', '', regex=False)
 
         doses = pd.to_numeric(doses, errors='coerce')
         responses = pd.to_numeric(responses, errors='coerce')
         
-        # Remove NaNs
         mask = ~np.isnan(doses) & ~np.isnan(responses)
         x_clean = doses[mask]
         y_clean = responses[mask]
 
         if len(y_clean) < 4: return None, None, None, None, None, "Not enough data"
 
-        # FIT THE CURVE
-        # Initial guesses [min, max, ec50, slope]
+        # 2. AUTO-SCALE: If max <= 1.0, convert to %
+        if max(y_clean) <= 1.0: y_clean = y_clean * 100
+
+        # 3. FIT
         p0 = [min(y_clean), max(y_clean), np.median(x_clean), 1]
-        
         popt, _ = curve_fit(four_param_logistic, x_clean, y_clean, p0, maxfev=10000)
-        min_val, max_val, ec50, hill_slope = popt
         
-        # CALCULATE METRICS
-        # EC90 = EC50 * ((90/10)^(1/slope))
+        # 4. METRICS
+        min_val, max_val, ec50, hill_slope = popt
         ec90 = ec50 * ((90 / 10) ** (1 / abs(hill_slope)))
-        # EC25 = EC50 * ((25/75)^(1/slope))
         ec25 = ec50 * ((25 / 75) ** (1 / abs(hill_slope)))
         
-        # R-SQUARED
         y_pred = four_param_logistic(x_clean, *popt)
         r2 = get_r_squared(y_clean, y_pred)
         
@@ -60,190 +59,187 @@ def calculate_metrics(doses, responses):
         if r2 < 0.9: status = "⚠️ Poor Fit"
 
         return popt, ec25, ec50, ec90, r2, status
-        
-    except Exception as e:
+    except:
         return None, None, None, None, None, "Fit Failed"
 
-def generate_panel(df, dose_col, sample_cols, color_hex, title, unit):
-    """Reusable function to generate Left or Right panel"""
-    st.markdown(f"### {title}")
+# ==========================================
+#        APP NAVIGATION
+# ==========================================
+
+st.sidebar.title("⚙️ Mode Selector")
+app_mode = st.sidebar.radio("Choose Analysis Type:", 
+    ["Standardized Protocol (IgE/SP)", "Custom Experiment (Flexible)"])
+
+st.sidebar.divider()
+
+# ==========================================
+#   MODE 1: STANDARDIZED PROTOCOL (The LIMS)
+# ==========================================
+if app_mode == "Standardized Protocol (IgE/SP)":
     
-    if dose_col not in df.columns:
-        st.error(f"Missing column: {dose_col}")
-        return
+    st.title("🧬 Mast Cell Multi-Donor Analyzer")
+
+    # --- METADATA ---
+    with st.expander("📝 Experiment Setup", expanded=True):
+        c1, c2, c3 = st.columns(3)
+        with c1: test_date = st.date_input("Date", date.today())
+        with c2: raw_link = st.text_input("Raw Data Link", "http://...")
+        with c3: num_donors = st.number_input("How many Donors?", 1, 10, 1)
+
+        st.write("**Define Donors:**")
+        donors = []
+        cols = st.columns(min(num_donors, 5)) # Show max 5 columns for layout
+        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+        
+        for i in range(num_donors):
+            col_idx = i % 5
+            with cols[col_idx]:
+                name = st.text_input(f"Donor {i+1} Name", f"Donor_{i+1}")
+                donors.append({"name": name, "color": colors[i], "ige_cols": [], "sp_cols": []})
+
+    # --- UPLOAD ---
+    uploaded_file = st.file_uploader("Upload Standardized Data", type=['csv', 'xlsx'])
     
-    results = []
-    fig = go.Figure()
-    doses = df[dose_col]
+    if uploaded_file:
+        col_ige_dose = st.sidebar.text_input("IgE Dose Col", "Dose_IgE")
+        col_sp_dose = st.sidebar.text_input("SP Dose Col", "Dose_SP")
 
-    for col in sample_cols:
-        responses = df[col]
-        popt, ec25, ec50, ec90, r2, status = calculate_metrics(doses, responses)
-        
-        if popt is not None:
-            # Append Results
-            results.append({
-                "Sample": col,
-                "EC25": ec25,
-                "EC50": ec50,
-                "EC90": ec90,
-                "R²": r2,
-                "Max": popt[1],
-                "Status": status
-            })
-            
-            # Add to Plot
-            # Clean data for plotting
-            d_plot = pd.to_numeric(doses.astype(str).str.replace(',', '.'), errors='coerce')
-            r_plot = pd.to_numeric(responses.astype(str).str.replace(',', '.'), errors='coerce')
-            mask = ~np.isnan(d_plot) & ~np.isnan(r_plot)
-            
-            # Raw dots
-            fig.add_trace(go.Scatter(
-                x=d_plot[mask], y=r_plot[mask], 
-                mode='markers', name=f'{col}',
-                marker=dict(color=color_hex)
-            ))
-            
-            # Fitted Line
-            x_min, x_max = min(d_plot[mask]), max(d_plot[mask])
-            if x_min <= 0: x_min = 1e-9
-            x_smooth = np.logspace(np.log10(x_min), np.log10(x_max), 100)
-            y_smooth = four_param_logistic(x_smooth, *popt)
-            fig.add_trace(go.Scatter(
-                x=x_smooth, y=y_smooth, 
-                mode='lines', name=f'{col} Fit',
-                line=dict(color=color_hex, width=1)
-            ))
-        else:
-             results.append({"Sample": col, "Status": status})
+        try:
+            if uploaded_file.name.endswith('.csv'): df = pd.read_csv(uploaded_file)
+            else: df = pd.read_excel(uploaded_file)
+            df.columns = df.columns.str.strip()
 
-    # 1. Show Table
-    if results:
-        res_df = pd.DataFrame(results)
-        # Apply conditional formatting for Bad R2
-        st.dataframe(
-            res_df.style.applymap(lambda v: 'color: red; font-weight: bold;' if v == "⚠️ Poor Fit" else '', subset=['Status'])
-                  .format({"EC25": "{:.4f}", "EC50": "{:.4f}", "EC90": "{:.4f}", "R²": "{:.3f}", "Max": "{:.1f}"})
-        )
+            # --- ASSIGN COLUMNS ---
+            st.info("👇 Assign columns to each donor")
+            available_cols = [c for c in df.columns if c not in [col_ige_dose, col_sp_dose]]
+            
+            for d in donors:
+                with st.container():
+                    st.markdown(f"**👤 {d['name']}**")
+                    ca, cb = st.columns(2)
+                    d['ige_cols'] = ca.multiselect(f"Anti-IgE Samples ({d['name']})", available_cols, key=f"ige_{d['name']}")
+                    d['sp_cols'] = cb.multiselect(f"SP Samples ({d['name']})", available_cols, key=f"sp_{d['name']}")
+
+            if st.button("🚀 Run Standard Analysis"):
+                
+                # Helper to plot standardize mode
+                def plot_std_category(df, dose_col, donor_list, cat_name, unit):
+                    fig = go.Figure()
+                    res = []
+                    for d in donor_list:
+                        # Decide which cols to use based on category
+                        target_cols = d['ige_cols'] if cat_name == "Anti-IgE" else d['sp_cols']
+                        
+                        if dose_col not in df.columns: continue
+
+                        doses = df[dose_col]
+                        for col in target_cols:
+                            resp = df[col]
+                            popt, ec25, ec50, ec90, r2, status = calculate_metrics(doses, resp)
+                            
+                            if popt:
+                                res.append({"Donor": d['name'], "Sample": col, "EC50": ec50, "EC90": ec90, "Max": popt[1], "R²": r2})
+                                
+                                # Plot
+                                d_plot = pd.to_numeric(doses.astype(str).str.replace(',', '.'), errors='coerce')
+                                r_plot = pd.to_numeric(resp.astype(str).str.replace(',', '.').str.replace('%', ''), errors='coerce')
+                                mask = ~np.isnan(d_plot) & ~np.isnan(r_plot)
+                                y_plot = r_plot[mask]
+                                if max(y_plot) <= 1.0: y_plot = y_plot * 100
+                                
+                                # Points
+                                fig.add_trace(go.Scatter(x=d_plot[mask], y=y_plot, mode='markers', marker=dict(color=d['color']), showlegend=False))
+                                # Line
+                                x_smooth = np.logspace(np.log10(min(d_plot[mask])+1e-9), np.log10(max(d_plot[mask])), 100)
+                                y_smooth = four_param_logistic(x_smooth, *popt)
+                                fig.add_trace(go.Scatter(x=x_smooth, y=y_smooth, mode='lines', name=f"{d['name']} {col}", line=dict(color=d['color'])))
+                    
+                    fig.update_layout(title=f"{cat_name}", xaxis_title=f"Dose ({unit})", yaxis_title="Degranulation %", xaxis_type="log", height=450)
+                    return pd.DataFrame(res), fig
+
+                # Generate
+                st.markdown("### 📊 Results")
+                r_ige, f_ige = plot_std_category(df, col_ige_dose, donors, "Anti-IgE", "µg/mL")
+                r_sp, f_sp = plot_std_category(df, col_sp_dose, donors, "SP", "µM")
+
+                c1, c2 = st.columns(2)
+                with c1: 
+                    st.plotly_chart(f_ige, use_container_width=True)
+                    st.dataframe(r_ige)
+                with c2: 
+                    st.plotly_chart(f_sp, use_container_width=True)
+                    st.dataframe(r_sp)
+                
+                # HTML Export
+                st.success("Analysis Complete. Download report below.")
+                html = f"<html><body><h1>Mast Cell Report ({test_date})</h1><h2>Anti-IgE</h2>{r_ige.to_html()}{f_ige.to_html(full_html=False, include_plotlyjs='cdn')}<h2>SP</h2>{r_sp.to_html()}{f_sp.to_html(full_html=False, include_plotlyjs='cdn')}</body></html>"
+                b64 = base64.b64encode(html.encode()).decode()
+                st.markdown(f'<a href="data:text/html;base64,{b64}" download="Report.html">📥 Download Interactive Report</a>', unsafe_allow_html=True)
+
+        except Exception as e: st.error(f"Error: {e}")
+
+# ==========================================
+#   MODE 2: CUSTOM EXPERIMENT (Flexible)
+# ==========================================
+elif app_mode == "Custom Experiment (Flexible)":
     
-    # 2. Show Plot
-    fig.update_layout(
-        title=f"{title} (Log Scale)",
-        xaxis_title=f"Dose ({unit})", yaxis_title="% Degranulation",
-        xaxis_type="log", height=500, margin=dict(l=20, r=20, t=40, b=20)
-    )
-    st.plotly_chart(fig, use_container_width=True)
-    return pd.DataFrame(results)
+    st.title("🧪 Custom Dose-Response Playground")
+    st.markdown("Flexible mode: Upload any file, pick any columns.")
 
-# --- 2. THE APP UI ---
-
-# HEADER
-st.title("🧬 Mast Cell Dual-Assay Analyzer")
-c1, c2, c3 = st.columns([1, 1, 2])
-with c1:
-    test_date = st.date_input("Date of Test", date.today())
-with c2:
-    donor_id = st.text_input("Donor / Experiment ID", "Donor_001")
-
-st.divider()
-
-# SIDEBAR CONFIG
-with st.sidebar:
-    st.header("1. Template")
-    st.info("The template now includes TWO dose columns: one for IgE and one for SP.")
+    custom_file = st.file_uploader("Upload Any Data", type=['csv', 'xlsx'], key="custom")
     
-    # Generate Standardized Template
-    # IgE: 9 points, SP: 10 points. We pad IgE with None.
-    ige_doses = [1.0, 0.5, 0.1, 0.05, 0.01, 0.0075, 0.005, 0.0025, 0.001, None]
-    sp_doses  = [3.5, 2.5, 1.5, 1.0, 0.75, 0.5, 0.3, 0.15, 0.075, 0.05]
-    
-    template_data = {
-        "Dose_IgE": ige_doses,
-        "Dose_SP": sp_doses,
-        "IgE_Sample_1": [None]*10,
-        "IgE_Sample_2": [None]*10,
-        "SP_Sample_1": [None]*10,
-        "SP_Sample_2": [None]*10
-    }
-    df_temp = pd.DataFrame(template_data)
-    csv_temp = df_temp.to_csv(index=False).encode('utf-8')
-    st.download_button("📥 Download Standard Template", csv_temp, "mast_cell_template.csv", "text/csv")
-
-    st.header("2. Settings")
-    st.write("Confirm standardized columns:")
-    col_ige_dose = st.text_input("IgE Dose Column Name", "Dose_IgE")
-    col_sp_dose = st.text_input("SP Dose Column Name", "Dose_SP")
-
-# MAIN UPLOAD
-uploaded_file = st.file_uploader("Upload Completed Data (CSV/Excel)", type=['csv', 'xlsx'])
-
-if uploaded_file:
-    try:
-        # Load Data
-        if uploaded_file.name.endswith('.csv'):
-            df = pd.read_csv(uploaded_file)
-        else:
-            df = pd.read_excel(uploaded_file)
+    if custom_file:
+        try:
+            if custom_file.name.endswith('.csv'): df_c = pd.read_csv(custom_file)
+            else: df_c = pd.read_excel(custom_file)
             
-        # Strip whitespace from headers
-        df.columns = df.columns.str.strip()
-        
-        # --- COLUMN SELECTION ---
-        st.subheader("Select Samples")
-        col_select_1, col_select_2 = st.columns(2)
-        
-        all_cols = [c for c in df.columns if c not in [col_ige_dose, col_sp_dose]]
-        
-        with col_select_1:
-            # Try to auto-detect columns containing "IgE"
-            default_ige = [c for c in all_cols if "ige" in c.lower()]
-            ige_samples = st.multiselect("Select Anti-IgE Samples", all_cols, default=default_ige)
+            # 1. Select X-Axis
+            st.sidebar.subheader("Custom Settings")
+            dose_col = st.sidebar.selectbox("Which column is the Dose (X-axis)?", df_c.columns)
+            unit_label = st.sidebar.text_input("X-Axis Unit Label", "ng/mL")
             
-        with col_select_2:
-            # Try to auto-detect columns containing "SP"
-            default_sp = [c for c in all_cols if "sp" in c.lower()]
-            sp_samples = st.multiselect("Select SP Samples", all_cols, default=default_sp)
+            # 2. Select Y-Axis
+            st.subheader("Select Samples to Analyze")
+            # Default to all columns except dose
+            available = [c for c in df_c.columns if c != dose_col]
+            selected_samples = st.multiselect("Select Y-columns", available, default=available[:2])
 
-        st.divider()
+            if selected_samples:
+                results_c = []
+                fig_c = go.Figure()
+                doses = df_c[dose_col]
 
-        # --- DUAL PANELS ---
-        left_panel, right_panel = st.columns(2)
+                for sample in selected_samples:
+                    responses = df_c[sample]
+                    popt, ec25, ec50, ec90, r2, status = calculate_metrics(doses, responses)
+                    
+                    if popt is not None:
+                        results_c.append({
+                            "Sample": sample, "EC50": ec50, "EC90": ec90, 
+                            "Max Response": popt[1], "R²": r2, "Status": status
+                        })
+                        
+                        # Plot Logic
+                        d_plot = pd.to_numeric(doses.astype(str).str.replace(',', '.'), errors='coerce')
+                        r_plot = pd.to_numeric(responses.astype(str).str.replace(',', '.').str.replace('%', ''), errors='coerce')
+                        mask = ~np.isnan(d_plot) & ~np.isnan(r_plot)
+                        y_plot = r_plot[mask]
+                        if max(y_plot) <= 1.0: y_plot = y_plot * 100
 
-        with left_panel:
-            res_ige = generate_panel(df, col_ige_dose, ige_samples, "#1f77b4", "Anti-IgE (µg/mL)", "µg/mL")
+                        fig_c.add_trace(go.Scatter(x=d_plot[mask], y=y_plot, mode='markers', name=sample))
+                        
+                        x_smooth = np.logspace(np.log10(min(d_plot[mask])+1e-9), np.log10(max(d_plot[mask])), 100)
+                        y_smooth = four_param_logistic(x_smooth, *popt)
+                        fig_c.add_trace(go.Scatter(x=x_smooth, y=y_smooth, mode='lines', name=f"{sample} Fit"))
+                    else:
+                        results_c.append({"Sample": sample, "Status": status})
 
-        with right_panel:
-            res_sp = generate_panel(df, col_sp_dose, sp_samples, "#d62728", "SP (µM)", "µM")
+                # Display
+                c_tbl, c_plt = st.columns([1, 2])
+                with c_tbl:
+                    st.dataframe(pd.DataFrame(results_c))
+                with c_plt:
+                    fig_c.update_layout(xaxis_title=f"Dose ({unit_label})", yaxis_title="Response %", xaxis_type="log", height=500)
+                    st.plotly_chart(fig_c, use_container_width=True)
 
-        # --- EXPORT REPORT ---
-        st.divider()
-        st.subheader("Export Report")
-        
-        if st.button("Generate Combined Report"):
-            # Create a simple Excel-compatible CSV structure
-            # We tag the results with the metadata
-            
-            report_lines = []
-            report_lines.append(f"Experiment Date,{test_date}")
-            report_lines.append(f"Donor ID,{donor_id}")
-            report_lines.append("") # Empty line
-            
-            report_lines.append("--- Anti-IgE Results ---")
-            report_lines.append(res_ige.to_csv(index=False))
-            report_lines.append("")
-            report_lines.append("--- SP Results ---")
-            report_lines.append(res_sp.to_csv(index=False))
-            
-            final_csv = "\n".join(report_lines)
-            
-            filename = f"Results_{donor_id}_{test_date}.csv"
-            st.download_button(
-                label="📥 Download Final Report",
-                data=final_csv,
-                file_name=filename,
-                mime="text/csv"
-            )
-
-    except Exception as e:
-        st.error(f"Error processing file: {e}")
+        except Exception as e: st.error(f"Error reading file: {e}")
