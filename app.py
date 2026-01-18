@@ -137,7 +137,8 @@ if app_mode == "Standardized Protocol (IgE/SP)":
                             resp = df[col]
                             popt, ec25, ec50, ec90, r2, status = calculate_metrics(doses, resp)
                             
-                            if popt:
+                            # --- FIX IS HERE: Check for None explicitly ---
+                            if popt is not None:
                                 res.append({"Donor": d['name'], "Sample": col, "EC50": ec50, "EC90": ec90, "Max": popt[1], "R²": r2})
                                 
                                 # Plot
@@ -213,6 +214,7 @@ elif app_mode == "Custom Experiment (Flexible)":
                     responses = df_c[sample]
                     popt, ec25, ec50, ec90, r2, status = calculate_metrics(doses, responses)
                     
+                    # --- FIX IS HERE: Check for None explicitly ---
                     if popt is not None:
                         results_c.append({
                             "Sample": sample, "EC50": ec50, "EC90": ec90, 
