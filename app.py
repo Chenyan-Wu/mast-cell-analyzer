@@ -31,9 +31,9 @@ def get_r_squared(y_true, y_pred):
     except:
         return 0
 
-def calculate_metrics(doses, responses):
+ddef calculate_metrics(doses, responses):
     try:
-        # 1. SCRUBBER: Handle commas and % signs
+        # 1. SCRUBBER
         if isinstance(doses, pd.Series) and doses.dtype == object:
              doses = doses.astype(str).str.replace(',', '.', regex=False).str.replace('%', '', regex=False)
         if isinstance(responses, pd.Series) and responses.dtype == object:
@@ -43,7 +43,7 @@ def calculate_metrics(doses, responses):
         responses = pd.to_numeric(responses, errors='coerce')
         
         # 2. CLEAN & LOG TRANSFORM
-        # We must filter out Dose <= 0 because Log10(0) is impossible
+        # Filter: Dose > 0 and valid numbers
         mask = (doses > 0) & ~np.isnan(doses) & ~np.isnan(responses)
         x_raw = doses[mask]
         y_clean = responses[mask]
@@ -53,26 +53,43 @@ def calculate_metrics(doses, responses):
         # 3. AUTO-SCALE (Percent Check)
         if max(y_clean) <= 1.0: y_clean = y_clean * 100
 
-        # Transform X to Log10 space for calculation
+        # Transform X to Log10
         x_log = np.log10(x_raw)
-
-        # 4. ROBUST GUESSING
-        # Guess: Min=0, Max=MaxObserved, LogEC50=Median, Slope=1
-        p0 = [0, max(y_clean), np.median(x_log), 1.0]
         
-        # FIT (Using Log X)
-        # We removed strict bounds to prevent crashes on weird data
-        popt, _ = curve_fit(four_param_logistic, x_log, y_clean, p0, maxfev=10000)
+        # --- SMART BOUNDS (The Fix) ---
+        # We define a "Safe Window" for the fit parameters
+        
+        # A. EC50 Range: Must be within the tested dose range (+/- 2 log units buffer)
+        # e.g. If doses are 0.001 (-3) to 1.0 (0), allow EC50 between -5 and 2.
+        min_log_dose = min(x_log)
+        max_log_dose = max(x_log)
+        
+        # B. Initial Guesses (p0)
+        # Guess the EC50 is exactly in the middle of your doses
+        p0_log_ec50 = np.median(x_log)
+        p0_min = min(y_clean)
+        p0_max = max(y_clean)
+        p0_slope = 1.0
+        p0 = [p0_min, p0_max, p0_log_ec50, p0_slope]
+
+        # C. Hard Boundaries ([Lowers], [Uppers])
+        # Min: -20% to MaxObserved (Allow small negative noise)
+        # Max: MinObserved to 200% (Don't allow infinite response)
+        # LogEC50: Constrained to dose window +/- 2 logs
+        # Slope: 0.1 (gentle) to 10 (steep). Prevents negative/inverted slopes.
+        bounds = (
+            [-20,           min(y_clean),  min_log_dose - 2,  0.1], # Lower Bounds
+            [max(y_clean),  200,           max_log_dose + 2,  10.0] # Upper Bounds
+        )
+
+        # 4. FIT WITH BOUNDS
+        popt, _ = curve_fit(four_param_logistic, x_log, y_clean, p0, bounds=bounds, maxfev=10000)
         
         min_val, max_val, log_ec50, hill_slope = popt
         
         # 5. CALCULATE RESULTS
-        ec50 = 10**log_ec50 # Convert back to linear dose
-        
-        # EC90 Formula: logEC90 = logEC50 + (1/Slope)*log10(90/10)
+        ec50 = 10**log_ec50
         ec90 = 10**(log_ec50 + (1/hill_slope)*np.log10(90/10))
-        
-        # EC25 Formula
         ec25 = 10**(log_ec50 + (1/hill_slope)*np.log10(25/75))
         
         # R-SQUARED
@@ -85,7 +102,7 @@ def calculate_metrics(doses, responses):
         return popt, ec25, ec50, ec90, r2, status
         
     except Exception as e:
-        # print(f"Debug Error: {e}") # Uncomment for debugging
+        # print(f"Fit Error: {e}") 
         return None, None, None, None, None, f"Fit Failed"
 
 # ==========================================
