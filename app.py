@@ -273,7 +273,7 @@ elif app_mode == "Custom Experiment (Flexible)":
                         x_min, x_max = min(x_plot_raw), max(x_plot_raw)
                         x_smooth = np.logspace(np.log10(x_min), np.log10(x_max), 100)
                         
-                        # !!! CRITICAL !!! Log Convert X before plotting
+                        # Log Convert X before plotting
                         y_smooth = four_param_logistic(np.log10(x_smooth), *popt)
                         
                         fig_c.add_trace(go.Scatter(x=x_smooth, y=y_smooth, mode='lines', name=f"{sample} Fit"))
@@ -282,4 +282,9 @@ elif app_mode == "Custom Experiment (Flexible)":
 
                 c_tbl, c_plt = st.columns([1, 2])
                 with c_tbl:
-                    st.dataframe
+                    st.dataframe(pd.DataFrame(results_c))
+                with c_plt:
+                    fig_c.update_layout(xaxis_title=f"Dose ({unit_label})", yaxis_title="Response %", xaxis_type="log", height=500)
+                    st.plotly_chart(fig_c, use_container_width=True)
+
+        except Exception as e: st.error(f"Error reading file: {e}")
