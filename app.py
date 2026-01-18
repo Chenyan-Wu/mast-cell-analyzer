@@ -90,7 +90,7 @@ def save_to_google_sheet(df, sheet_name="MastCell_DB"):
             creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
             client = gspread.authorize(creds)
         else:
-            # Fallback for local testing if file exists
+            # Fallback for local testing
             creds = ServiceAccountCredentials.from_json_keyfile_name("service_account.json", scope)
             client = gspread.authorize(creds)
 
@@ -210,17 +210,17 @@ if app_mode == "Standardized Protocol (IgE/SP)":
 
             # --- RUN BUTTON ---
             if st.button("🚀 Run Standard Analysis"):
-                # Run calc and store in session_state
                 r_ige, f_ige = plot_std_category(df, col_ige_dose, donors, "Anti-IgE", "µg/mL")
                 r_sp, f_sp = plot_std_category(df, col_sp_dose, donors, "SP", "µM")
                 
                 st.session_state['std_results'] = {
                     'r_ige': r_ige, 'f_ige': f_ige,
                     'r_sp': r_sp, 'f_sp': f_sp,
-                    'raw_link': raw_link
+                    'raw_link': raw_link,
+                    'test_date': test_date
                 }
 
-            # --- DISPLAY RESULTS (Persist View) ---
+            # --- DISPLAY & EXPORT ---
             if 'std_results' in st.session_state:
                 res = st.session_state['std_results']
                 
@@ -233,7 +233,25 @@ if app_mode == "Standardized Protocol (IgE/SP)":
                     st.plotly_chart(res['f_sp'], use_container_width=True)
                     st.dataframe(res['r_sp'])
 
-                # Save Button
+                # HTML Report (Now inside persistent block)
+                html = f"""
+                <html>
+                <head><title>Mast Cell Report</title></head>
+                <body>
+                    <h1>Mast Cell Report ({res['test_date']})</h1>
+                    <h2>Anti-IgE</h2>
+                    {res['r_ige'].to_html()}
+                    {res['f_ige'].to_html(full_html=False, include_plotlyjs='cdn')}
+                    <hr>
+                    <h2>SP</h2>
+                    {res['r_sp'].to_html()}
+                    {res['f_sp'].to_html(full_html=False, include_plotlyjs='cdn')}
+                </body>
+                </html>
+                """
+                b64 = base64.b64encode(html.encode()).decode()
+                st.markdown(f'<a href="data:text/html;base64,{b64}" download="Mast_Cell_Report_{res["test_date"]}.html" style="text-decoration:none;">📥 <b>Download Interactive HTML Report</b></a>', unsafe_allow_html=True)
+
                 st.divider()
                 st.subheader("☁️ Database")
                 if st.button("💾 Save Results to Google Drive"):
@@ -269,11 +287,8 @@ elif app_mode == "Custom Experiment (Flexible)":
             selected_samples = st.multiselect("Select Y-columns", available, default=available[:2])
 
             if selected_samples:
-                # Store logic
                 if st.button("Run Custom Analysis") or ('custom_results' in st.session_state):
                     
-                    # Recalculate if button clicked OR if we need to refresh data
-                    # For custom mode, lightweight recalc is fine usually
                     results_c = []
                     fig_c = go.Figure()
                     doses = df_c[dose_col]
@@ -298,7 +313,6 @@ elif app_mode == "Custom Experiment (Flexible)":
                             if max(y_plot) <= 1.0: y_plot = y_plot * 100
 
                             fig_c.add_trace(go.Scatter(x=x_plot_raw, y=y_plot, mode='markers', name=sample))
-                            
                             x_smooth = np.logspace(np.log10(min(x_plot_raw)), np.log10(max(x_plot_raw)), 100)
                             y_smooth = four_param_logistic(np.log10(x_smooth), *popt)
                             fig_c.add_trace(go.Scatter(x=x_smooth, y=y_smooth, mode='lines', name=f"{sample} Fit"))
@@ -307,15 +321,19 @@ elif app_mode == "Custom Experiment (Flexible)":
                     
                     res_df_c = pd.DataFrame(results_c)
                     
-                    # Persist
-                    st.session_state['custom_results'] = res_df_c
+                    # Store logic
+                    st.session_state['custom_results'] = {'df': res_df_c, 'fig': fig_c}
 
-                    # Display
                     c_tbl, c_plt = st.columns([1, 2])
                     with c_tbl: st.dataframe(res_df_c)
                     with c_plt:
                         fig_c.update_layout(xaxis_title=f"Dose ({unit_label})", yaxis_title="Response %", xaxis_type="log", height=500)
                         st.plotly_chart(fig_c, use_container_width=True)
+
+                    # Custom HTML Report
+                    html_c = f"<html><body><h1>Custom Analysis Report</h1>{res_df_c.to_html()}{fig_c.to_html(full_html=False, include_plotlyjs='cdn')}</body></html>"
+                    b64_c = base64.b64encode(html_c.encode()).decode()
+                    st.markdown(f'<a href="data:text/html;base64,{b64_c}" download="Custom_Report.html">📥 <b>Download Custom HTML Report</b></a>', unsafe_allow_html=True)
 
                     st.divider()
                     if st.button("💾 Save Custom Results to Drive"):
