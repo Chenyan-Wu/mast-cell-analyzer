@@ -31,7 +31,7 @@ def get_r_squared(y_true, y_pred):
     except:
         return 0
 
-ddef calculate_metrics(doses, responses):
+def calculate_metrics(doses, responses):
     try:
         # 1. SCRUBBER
         if isinstance(doses, pd.Series) and doses.dtype == object:
