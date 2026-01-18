@@ -43,37 +43,34 @@ def calculate_metrics(doses, responses):
         responses = pd.to_numeric(responses, errors='coerce')
         
         # 2. CLEAN & LOG TRANSFORM
-        # Filter: Dose > 0 and valid numbers
         mask = (doses > 0) & ~np.isnan(doses) & ~np.isnan(responses)
         x_raw = doses[mask]
         y_clean = responses[mask]
         
-        # Need at least 4 points to fit a 4-parameter curve
         if len(y_clean) < 4: return None, None, None, None, None, "Not enough data"
 
         # 3. AUTO-SCALE
-        # If your data is 0.0-1.0, convert to 0-100%
         if max(y_clean) <= 1.0: y_clean = y_clean * 100
 
         x_log = np.log10(x_raw)
         
-        # --- 4. STRICT BOUNDS (The Fix for e-14) ---
+        # --- 4. HYBRID BOUNDS (Fixed Bottom / Floating Top) ---
         min_log = min(x_log)
         max_log = max(x_log)
-        dose_span = max_log - min_log
         
-        # We constrain the EC50 to be INSIDE the tested range (plus a small buffer)
-        # If your doses are 0.001 to 1.0, EC50 CANNOT be 1e-14.
+        # A. Bounds Setup ([Lower Limits], [Upper Limits])
+        # Bottom: Locked to approx 0 (between -0.001 and 0.001)
+        # Top: Floating! Must be at least the highest dot, up to 150%
+        # EC50: Constrained to tested range (+/- 1 log unit) to prevent e-14 errors
         
-        # Bounds: ([Lower Limits], [Upper Limits])
-        # Order: Min_Response, Max_Response, Log_EC50, Slope
         bounds = (
-            [-10,           min(y_clean),  min_log - 1.0,  0.1],  # Lower
-            [max(y_clean),  150,           max_log + 1.0,  10.0]  # Upper
+            [-0.001,        max(y_clean),  min_log - 1.0,  0.1],  # Lower
+            [ 0.001,        150,           max_log + 1.0,  10.0]  # Upper
         )
         
-        # Initial Guess (Help the optimizer start in the middle)
-        p0 = [min(y_clean), max(y_clean), np.median(x_log), 1.0]
+        # Initial Guess
+        # Min=0, Max=MaxObserved, EC50=Median, Slope=1
+        p0 = [0, max(y_clean), np.median(x_log), 1.0]
 
         # 5. FIT
         popt, _ = curve_fit(four_param_logistic, x_log, y_clean, p0, bounds=bounds, maxfev=10000)
