@@ -32,7 +32,7 @@ def get_r_squared(y_true, y_pred):
         return 0
 
 def calculate_metrics(doses, responses):
-    """Hybrid Fit: Fixed Bottom (0), Floating Top."""
+    """Hybrid Fit: Fixed Bottom (0), Floating Top + QC Logic."""
     try:
         if isinstance(doses, pd.Series) and doses.dtype == object:
              doses = doses.astype(str).str.replace(',', '.', regex=False).str.replace('%', '', regex=False)
@@ -71,8 +71,13 @@ def calculate_metrics(doses, responses):
         y_pred = four_param_logistic(x_log, *popt)
         r2 = get_r_squared(y_clean, y_pred)
         
-        status = "OK"
-        if r2 < 0.9: status = "⚠️ Poor Fit"
+        # --- STATUS / QC LOGIC ---
+        if r2 < 0.9:
+            status = "⚠️ Poor Fit"
+        elif max_val < 25.0:
+            status = "⚠️ Low (<25%)"
+        else:
+            status = "✅ Pass"
 
         return popt, ec25, ec50, ec90, r2, status
     except Exception as e:
@@ -90,7 +95,6 @@ def save_to_google_sheet(df, sheet_name="MastCell_DB"):
             creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
             client = gspread.authorize(creds)
         else:
-            # Fallback for local testing
             creds = ServiceAccountCredentials.from_json_keyfile_name("service_account.json", scope)
             client = gspread.authorize(creds)
 
@@ -162,10 +166,12 @@ if app_mode == "Standardized Protocol (IgE/SP)":
                     d['ige_cols'] = ca.multiselect(f"Anti-IgE Samples ({d['name']})", available_cols, key=f"ige_{d['name']}")
                     d['sp_cols'] = cb.multiselect(f"SP Samples ({d['name']})", available_cols, key=f"sp_{d['name']}")
 
-            # --- PLOTTING FUNCTION ---
+            # --- PLOTTING FUNCTION (Dual Plot) ---
             def plot_std_category(df, dose_col, donor_list, cat_name, unit):
-                fig = go.Figure()
+                fig_log = go.Figure()
+                fig_lin = go.Figure()
                 res = []
+                
                 for d in donor_list:
                     target_cols = d['ige_cols'] if cat_name == "Anti-IgE" else d['sp_cols']
                     if dose_col not in df.columns: continue
@@ -182,7 +188,7 @@ if app_mode == "Standardized Protocol (IgE/SP)":
                                 "Date": str(test_date), "Donor": d['name'], 
                                 "Stimulant": cat_name, "Sample": col, 
                                 "EC25": ec25, "EC50": ec50, "EC90": ec90, 
-                                "Max": popt[1], "R²": r2
+                                "Max": popt[1], "R²": r2, "Status": status
                             })
                             
                             d_plot = pd.to_numeric(doses.astype(str).str.replace(',', '.'), errors='coerce')
@@ -193,31 +199,51 @@ if app_mode == "Standardized Protocol (IgE/SP)":
                             y_plot = r_plot[mask]
                             if max(y_plot) <= 1.0: y_plot = y_plot * 100
                             
-                            fig.add_trace(go.Scatter(x=x_plot_raw, y=y_plot, mode='markers', marker=dict(color=d['color']), showlegend=False))
+                            # TRACES FOR LOG PLOT
+                            fig_log.add_trace(go.Scatter(x=x_plot_raw, y=y_plot, mode='markers', marker=dict(color=d['color']), showlegend=False))
                             
-                            x_smooth = np.logspace(np.log10(min(x_plot_raw)), np.log10(max(x_plot_raw)), 100)
-                            y_smooth = four_param_logistic(np.log10(x_smooth), *popt)
+                            # TRACES FOR LINEAR PLOT
+                            fig_lin.add_trace(go.Scatter(x=x_plot_raw, y=y_plot, mode='markers', marker=dict(color=d['color']), showlegend=False))
+                            
+                            # FIT LINES
+                            # Log-space smooth for Log Plot
+                            x_smooth_log = np.logspace(np.log10(min(x_plot_raw)), np.log10(max(x_plot_raw)), 100)
+                            y_smooth_log = four_param_logistic(np.log10(x_smooth_log), *popt)
+                            
+                            # Lin-space smooth for Linear Plot (visual looks better with linspace)
+                            x_smooth_lin = np.linspace(min(x_plot_raw), max(x_plot_raw), 100)
+                            y_smooth_lin = four_param_logistic(np.log10(x_smooth_lin), *popt)
                             
                             legend_name = f"{d['name']} {cat_name}"
-                            fig.add_trace(go.Scatter(
-                                x=x_smooth, y=y_smooth, mode='lines', name=legend_name, 
+                            
+                            # Add Lines to both figures
+                            fig_log.add_trace(go.Scatter(
+                                x=x_smooth_log, y=y_smooth_log, mode='lines', name=legend_name, 
                                 line=dict(color=d['color']), showlegend=show_legend_for_donor, legendgroup=d['name']
                             ))
+                            
+                            fig_lin.add_trace(go.Scatter(
+                                x=x_smooth_lin, y=y_smooth_lin, mode='lines', name=legend_name, 
+                                line=dict(color=d['color']), showlegend=False, legendgroup=d['name'] # No legend on bottom plot to save space
+                            ))
+                            
                             show_legend_for_donor = False
                 
-                fig.update_layout(title=f"{cat_name}", xaxis_title=f"Dose ({unit})", yaxis_title="Degranulation %", xaxis_type="log", height=450)
-                return pd.DataFrame(res), fig
+                # Update Layouts
+                fig_log.update_layout(title=f"{cat_name} (Log Scale)", xaxis_title=f"Dose ({unit})", yaxis_title="Degranulation %", xaxis_type="log", height=450)
+                fig_lin.update_layout(title=f"{cat_name} (Linear Scale)", xaxis_title=f"Dose ({unit})", yaxis_title="Degranulation %", xaxis_type="linear", height=450)
+                
+                return pd.DataFrame(res), fig_log, fig_lin
 
             # --- RUN BUTTON ---
             if st.button("🚀 Run Standard Analysis"):
-                r_ige, f_ige = plot_std_category(df, col_ige_dose, donors, "Anti-IgE", "µg/mL")
-                r_sp, f_sp = plot_std_category(df, col_sp_dose, donors, "SP", "µM")
+                r_ige, f_ige_log, f_ige_lin = plot_std_category(df, col_ige_dose, donors, "Anti-IgE", "µg/mL")
+                r_sp, f_sp_log, f_sp_lin = plot_std_category(df, col_sp_dose, donors, "SP", "µM")
                 
                 st.session_state['std_results'] = {
-                    'r_ige': r_ige, 'f_ige': f_ige,
-                    'r_sp': r_sp, 'f_sp': f_sp,
-                    'raw_link': raw_link,
-                    'test_date': test_date
+                    'r_ige': r_ige, 'f_ige_log': f_ige_log, 'f_ige_lin': f_ige_lin,
+                    'r_sp': r_sp, 'f_sp_log': f_sp_log, 'f_sp_lin': f_sp_lin,
+                    'raw_link': raw_link, 'test_date': test_date
                 }
 
             # --- DISPLAY & EXPORT ---
@@ -225,27 +251,55 @@ if app_mode == "Standardized Protocol (IgE/SP)":
                 res = st.session_state['std_results']
                 
                 st.markdown("### 📊 Results")
+                
+                # --- IGE SECTION ---
+                st.subheader("Anti-IgE Results")
                 c1, c2 = st.columns(2)
                 with c1: 
-                    st.plotly_chart(res['f_ige'], use_container_width=True)
-                    st.dataframe(res['r_ige'])
+                    st.plotly_chart(res['f_ige_log'], use_container_width=True) # Top (Log)
+                    st.plotly_chart(res['f_ige_lin'], use_container_width=True) # Bottom (Linear)
                 with c2: 
-                    st.plotly_chart(res['f_sp'], use_container_width=True)
-                    st.dataframe(res['r_sp'])
+                    st.dataframe(res['r_ige'], height=600)
 
-                # HTML Report (Now inside persistent block)
+                st.divider()
+
+                # --- SP SECTION ---
+                st.subheader("SP Results")
+                c3, c4 = st.columns(2)
+                with c3: 
+                    st.plotly_chart(res['f_sp_log'], use_container_width=True) # Top (Log)
+                    st.plotly_chart(res['f_sp_lin'], use_container_width=True) # Bottom (Linear)
+                with c4: 
+                    st.dataframe(res['r_sp'], height=600)
+
+                # HTML Report (Side-by-Side Flexbox)
                 html = f"""
                 <html>
-                <head><title>Mast Cell Report</title></head>
+                <head>
+                    <title>Mast Cell Report</title>
+                    <style>
+                        .plot-row {{ display: flex; flex-direction: row; width: 100%; }}
+                        .plot-col {{ width: 50%; padding: 5px; }}
+                    </style>
+                </head>
                 <body>
                     <h1>Mast Cell Report ({res['test_date']})</h1>
+                    
                     <h2>Anti-IgE</h2>
                     {res['r_ige'].to_html()}
-                    {res['f_ige'].to_html(full_html=False, include_plotlyjs='cdn')}
+                    <div class="plot-row">
+                        <div class="plot-col">{res['f_ige_log'].to_html(full_html=False, include_plotlyjs='cdn')}</div>
+                        <div class="plot-col">{res['f_ige_lin'].to_html(full_html=False, include_plotlyjs='cdn')}</div>
+                    </div>
+                    
                     <hr>
+                    
                     <h2>SP</h2>
                     {res['r_sp'].to_html()}
-                    {res['f_sp'].to_html(full_html=False, include_plotlyjs='cdn')}
+                    <div class="plot-row">
+                        <div class="plot-col">{res['f_sp_log'].to_html(full_html=False, include_plotlyjs='cdn')}</div>
+                        <div class="plot-col">{res['f_sp_lin'].to_html(full_html=False, include_plotlyjs='cdn')}</div>
+                    </div>
                 </body>
                 </html>
                 """
@@ -290,7 +344,8 @@ elif app_mode == "Custom Experiment (Flexible)":
                 if st.button("Run Custom Analysis") or ('custom_results' in st.session_state):
                     
                     results_c = []
-                    fig_c = go.Figure()
+                    fig_log = go.Figure()
+                    fig_lin = go.Figure()
                     doses = df_c[dose_col]
 
                     for sample in selected_samples:
@@ -312,26 +367,51 @@ elif app_mode == "Custom Experiment (Flexible)":
                             y_plot = r_plot[mask]
                             if max(y_plot) <= 1.0: y_plot = y_plot * 100
 
-                            fig_c.add_trace(go.Scatter(x=x_plot_raw, y=y_plot, mode='markers', name=sample))
-                            x_smooth = np.logspace(np.log10(min(x_plot_raw)), np.log10(max(x_plot_raw)), 100)
-                            y_smooth = four_param_logistic(np.log10(x_smooth), *popt)
-                            fig_c.add_trace(go.Scatter(x=x_smooth, y=y_smooth, mode='lines', name=f"{sample} Fit"))
+                            # Add to both figures
+                            fig_log.add_trace(go.Scatter(x=x_plot_raw, y=y_plot, mode='markers', name=sample))
+                            fig_lin.add_trace(go.Scatter(x=x_plot_raw, y=y_plot, mode='markers', name=sample))
+                            
+                            # Lines
+                            x_smooth_log = np.logspace(np.log10(min(x_plot_raw)), np.log10(max(x_plot_raw)), 100)
+                            y_smooth_log = four_param_logistic(np.log10(x_smooth_log), *popt)
+                            fig_log.add_trace(go.Scatter(x=x_smooth_log, y=y_smooth_log, mode='lines', name=f"{sample} Fit"))
+                            
+                            x_smooth_lin = np.linspace(min(x_plot_raw), max(x_plot_raw), 100)
+                            y_smooth_lin = four_param_logistic(np.log10(x_smooth_lin), *popt)
+                            fig_lin.add_trace(go.Scatter(x=x_smooth_lin, y=y_smooth_lin, mode='lines', name=f"{sample} Fit"))
+
                         else:
                             results_c.append({"Sample": sample, "Status": status})
                     
                     res_df_c = pd.DataFrame(results_c)
                     
-                    # Store logic
-                    st.session_state['custom_results'] = {'df': res_df_c, 'fig': fig_c}
+                    # Store
+                    st.session_state['custom_results'] = {'df': res_df_c, 'fig_log': fig_log, 'fig_lin': fig_lin}
 
+                    # Display
                     c_tbl, c_plt = st.columns([1, 2])
                     with c_tbl: st.dataframe(res_df_c)
                     with c_plt:
-                        fig_c.update_layout(xaxis_title=f"Dose ({unit_label})", yaxis_title="Response %", xaxis_type="log", height=500)
-                        st.plotly_chart(fig_c, use_container_width=True)
+                        fig_log.update_layout(title="Log Scale", xaxis_title=f"Dose ({unit_label})", yaxis_title="Response %", xaxis_type="log", height=400)
+                        st.plotly_chart(fig_log, use_container_width=True)
+                        
+                        fig_lin.update_layout(title="Linear Scale", xaxis_title=f"Dose ({unit_label})", yaxis_title="Response %", xaxis_type="linear", height=400)
+                        st.plotly_chart(fig_lin, use_container_width=True)
 
-                    # Custom HTML Report
-                    html_c = f"<html><body><h1>Custom Analysis Report</h1>{res_df_c.to_html()}{fig_c.to_html(full_html=False, include_plotlyjs='cdn')}</body></html>"
+                    # Custom HTML Report (Side-by-Side)
+                    html_c = f"""
+                    <html>
+                    <head><style>.row {{ display: flex; }} .col {{ width: 50%; }}</style></head>
+                    <body>
+                        <h1>Custom Analysis Report</h1>
+                        {res_df_c.to_html()}
+                        <div class="row">
+                            <div class="col">{fig_log.to_html(full_html=False, include_plotlyjs='cdn')}</div>
+                            <div class="col">{fig_lin.to_html(full_html=False, include_plotlyjs='cdn')}</div>
+                        </div>
+                    </body>
+                    </html>
+                    """
                     b64_c = base64.b64encode(html_c.encode()).decode()
                     st.markdown(f'<a href="data:text/html;base64,{b64_c}" download="Custom_Report.html">📥 <b>Download Custom HTML Report</b></a>', unsafe_allow_html=True)
 
