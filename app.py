@@ -145,6 +145,20 @@ if app_mode == "Standardized Protocol (IgE/SP)":
                 name = st.text_input(f"Donor {i+1} Name", f"Donor_{i+1}")
                 donors.append({"name": name, "color": colors[i], "ige_cols": [], "sp_cols": []})
 
+    # --- TEMPLATE & UPLOAD ---
+    st.write("---")
+    
+    # 1. Template Download
+    template_csv = "Dose_IgE,Dose_SP,IgE_Sample_1,IgE_Sample_2,SP_Sample_1,SP_Sample_2\n1.0,10.0,45.5,50.1,15.2,18.5\n0.5,5.0,38.2,42.5,12.0,14.5\n0.1,1.0,15.0,18.2,5.5,6.0\n0.01,0.1,2.0,5.0,0.5,1.0"
+    st.download_button(
+        label="📥 Download Template CSV",
+        data=template_csv,
+        file_name="mast_cell_template.csv",
+        mime="text/csv",
+        help="Click to download a sample file structure."
+    )
+
+    # 2. File Upload
     uploaded_file = st.file_uploader("Upload Standardized Data", type=['csv', 'xlsx'])
     
     if uploaded_file:
