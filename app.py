@@ -148,14 +148,25 @@ if app_mode == "Standardized Protocol (IgE/SP)":
     # --- TEMPLATE & UPLOAD ---
     st.write("---")
     
-    # 1. Template Download
-    template_csv = "Dose_IgE,Dose_SP,IgE_Sample_1,IgE_Sample_2,SP_Sample_1,SP_Sample_2\n1.0,10.0,45.5,50.1,15.2,18.5\n0.5,5.0,38.2,42.5,12.0,14.5\n0.1,1.0,15.0,18.2,5.5,6.0\n0.01,0.1,2.0,5.0,0.5,1.0"
+    # 1. Template Download (Updated with Requested Doses)
+    template_data = """Dose_IgE,Dose_SP,IgE_Sample_1,IgE_Sample_2,SP_Sample_1,SP_Sample_2
+1,3.5,45.0,42.0,55.0,50.0
+0.5,2.5,40.0,38.0,50.0,45.0
+0.1,1.5,35.0,30.0,45.0,40.0
+0.05,1,25.0,22.0,35.0,30.0
+0.01,0.75,15.0,12.0,25.0,20.0
+0.0075,0.5,10.0,8.0,15.0,12.0
+0.005,0.3,5.0,4.0,10.0,8.0
+0.0025,0.15,2.0,1.0,5.0,4.0
+0.001,0.075,1.0,0.5,2.0,1.0
+,0.05,,,1.0,0.5"""
+    
     st.download_button(
         label="📥 Download Template CSV",
-        data=template_csv,
+        data=template_data,
         file_name="mast_cell_template.csv",
         mime="text/csv",
-        help="Click to download a sample file structure."
+        help="Click to download the correct file structure with standard doses."
     )
 
     # 2. File Upload
@@ -238,7 +249,7 @@ if app_mode == "Standardized Protocol (IgE/SP)":
                             
                             fig_lin.add_trace(go.Scatter(
                                 x=x_smooth_lin, y=y_smooth_lin, mode='lines', name=legend_name, 
-                                line=dict(color=d['color']), showlegend=False, legendgroup=d['name'] # No legend on bottom plot to save space
+                                line=dict(color=d['color']), showlegend=False, legendgroup=d['name'] # No legend on bottom plot
                             ))
                             
                             show_legend_for_donor = False
