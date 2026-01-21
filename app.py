@@ -24,7 +24,7 @@ def four_param_logistic(x, min_val, max_val, log_ec50, hill_slope):
 
 def calculate_aic(n, rss, k):
     """Calculate Akaike Information Criterion (AIC)."""
-    if rss <= 0: return -np.inf # If perfect fit, AIC is very low (good)
+    if rss <= 0: return -np.inf 
     return n * np.log(rss / n) + 2 * k
 
 def get_r_squared(y_true, y_pred):
@@ -66,7 +66,6 @@ def calculate_metrics(doses, responses):
         # --- MODEL 1: 4PL (Sigmoidal) ---
         min_log = min(x_log)
         max_log = max(x_log)
-        # Bounds: Max can float up to 200% to test for runaway curves
         bounds = (
             [-0.001,        obs_max,       min_log - 1.0,  0.1], 
             [ 0.001,        200,           max_log + 1.0,  10.0] 
@@ -92,35 +91,26 @@ def calculate_metrics(doses, responses):
         aic_lin = calculate_aic(len(y_clean), rss_lin, 2)
 
         # --- DECISION TREE ---
-        
-        # Condition A: Runaway Curve? (Calculated Max > 150%)
-        # Condition B: Linear is better or similar? (Allow Linear to win even if slightly worse AIC, +2 buffer)
-        # Condition C: 4PL Failed?
-        
         force_linear = calc_max > 150.0 
-        better_linear = aic_lin < (aic_4pl + 2.0) # +2 favors simpler model
+        better_linear = aic_lin < (aic_4pl + 2.0) 
         
         is_linear = force_linear or better_linear or popt is None
         
         if is_linear:
-            # STATUS MSG
             if obs_max < 25.0:
                 status = "⚠️ Low (<25%) + Linear"
             else:
                 status = "⚠️ Linear Trend"
-            
-            # Return NA for metrics, Observed Max for 'Max'
             return None, "NA", "NA", "NA", "NA", obs_max, status
 
         else:
-            # SIGMOIDAL ACCEPTED
             min_val, max_val, log_ec50, hill_slope = popt
             ec50 = 10**log_ec50
             ec90 = 10**(log_ec50 + (1/hill_slope)*np.log10(90/10))
             ec25 = 10**(log_ec50 + (1/hill_slope)*np.log10(25/75))
             
             if obs_max < 25.0:
-                status = "⚠️ Low (<25%)" # Valid curve, just low
+                status = "⚠️ Low (<25%)" 
             elif r2_4pl < 0.9:
                 status = "⚠️ Poor Fit"
             else:
@@ -222,6 +212,10 @@ if app_mode == "Standardized Protocol (IgE/SP)":
             if uploaded_file.name.endswith('.csv'): df = pd.read_csv(uploaded_file)
             else: df = pd.read_excel(uploaded_file)
             df.columns = df.columns.str.strip()
+
+            # --- RESTORED THE MISSING LINE BELOW ---
+            available_cols = [c for c in df.columns if c not in [col_ige_dose, col_sp_dose]]
+            # ---------------------------------------
 
             st.info("👇 Assign columns to each donor")
             
