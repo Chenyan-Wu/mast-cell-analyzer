@@ -23,12 +23,7 @@ def four_param_logistic(x, min_val, max_val, log_ec50, hill_slope):
     return min_val + (max_val - min_val) / (1 + 10**((log_ec50 - x) * hill_slope))
 
 def calculate_aic(n, rss, k):
-    """
-    Calculate Akaike Information Criterion (AIC).
-    n: number of data points
-    rss: residual sum of squares
-    k: number of parameters
-    """
+    """Calculate Akaike Information Criterion (AIC)."""
     if rss <= 0: return np.inf
     return n * np.log(rss / n) + 2 * k
 
@@ -44,8 +39,10 @@ def get_r_squared(y_true, y_pred):
 
 def calculate_metrics(doses, responses):
     """
-    Smart Fit: Compares 4PL (Sigmoidal) vs Linear Models.
-    Uses AIC to decide if the data is actually just a straight line.
+    Strict QC Logic:
+    1. Linear vs 4PL (AIC Check)
+    2. Max Response < 25% Check
+    Returns 'NA' for invalid calculations.
     """
     try:
         # 1. DATA PREP
@@ -61,65 +58,72 @@ def calculate_metrics(doses, responses):
         x_raw = doses[mask]
         y_clean = responses[mask]
         
-        if len(y_clean) < 4: return None, None, None, None, None, "Not enough data"
+        if len(y_clean) < 4: return None, "NA", "NA", "NA", "NA", 0, "Not enough data"
         if max(y_clean) <= 1.0: y_clean = y_clean * 100
         x_log = np.log10(x_raw)
+        
+        obs_max = max(y_clean)
         
         # --- MODEL 1: 4PL (Sigmoidal) ---
         min_log = min(x_log)
         max_log = max(x_log)
         bounds = (
-            [-0.001,        max(y_clean),  min_log - 1.0,  0.1], 
+            [-0.001,        obs_max,       min_log - 1.0,  0.1], 
             [ 0.001,        150,           max_log + 1.0,  10.0] 
         )
-        p0 = [0, max(y_clean), np.median(x_log), 1.0]
+        p0 = [0, obs_max, np.median(x_log), 1.0]
         
         try:
             popt, _ = curve_fit(four_param_logistic, x_log, y_clean, p0, bounds=bounds, maxfev=10000)
             y_pred_4pl = four_param_logistic(x_log, *popt)
             rss_4pl = np.sum((y_clean - y_pred_4pl)**2)
-            aic_4pl = calculate_aic(len(y_clean), rss_4pl, 4) # 4 parameters
+            aic_4pl = calculate_aic(len(y_clean), rss_4pl, 4)
             r2_4pl = get_r_squared(y_clean, y_pred_4pl)
         except:
             popt = None
             aic_4pl = np.inf
 
         # --- MODEL 2: Linear Regression ---
-        slope, intercept, r_value, p_value, std_err = linregress(x_log, y_clean)
+        slope, intercept, r_value, _, _ = linregress(x_log, y_clean)
         y_pred_lin = slope * x_log + intercept
         rss_lin = np.sum((y_clean - y_pred_lin)**2)
-        aic_lin = calculate_aic(len(y_clean), rss_lin, 2) # 2 parameters
-        r2_lin = r_value**2
+        aic_lin = calculate_aic(len(y_clean), rss_lin, 2)
 
-        # --- DECISION LOGIC ---
-        # We prefer 4PL, so only switch if Linear is SIGNIFICANTLY better (Lower AIC by > 2)
-        # OR if 4PL failed to converge
+        # --- DECISION TREE ---
         
-        if popt is None:
-            # Fallback to linear stats if 4PL crashes
-            return None, None, None, None, r2_lin, "⚠️ Linear (4PL Failed)"
+        # 1. Is it Linear? (AIC_lin < AIC_4pl - 2)
+        is_linear = aic_lin < (aic_4pl - 2) or popt is None
         
-        min_val, max_val, log_ec50, hill_slope = popt
-        ec50 = 10**log_ec50
-        ec90 = 10**(log_ec50 + (1/hill_slope)*np.log10(90/10))
-        ec25 = 10**(log_ec50 + (1/hill_slope)*np.log10(25/75))
-        
-        # Status Checks
-        if aic_lin < (aic_4pl - 2):
-            # Linear model is statistically better
-            status = "⚠️ Linear Trend"
-            # We still return the 4PL params for plotting, but warn the user
-        elif r2_4pl < 0.9:
-            status = "⚠️ Poor Fit"
-        elif max_val < 25.0:
-            status = "⚠️ Low (<25%)"
+        if is_linear:
+            # LINEAR LOGIC:
+            # "Do not generate any EC and R2 calculation, just show NA"
+            # "Show the maximum of degranulation" (Observed Max)
+            if obs_max < 25.0:
+                status = "⚠️ Low (<25%) + Linear"
+            else:
+                status = "⚠️ Linear Trend"
+            
+            # Return None for popt (no curve), NA for metrics, obs_max for Max
+            return None, "NA", "NA", "NA", "NA", obs_max, status
+
         else:
-            status = "✅ Pass"
+            # SIGMOIDAL LOGIC:
+            min_val, max_val, log_ec50, hill_slope = popt
+            ec50 = 10**log_ec50
+            ec90 = 10**(log_ec50 + (1/hill_slope)*np.log10(90/10))
+            ec25 = 10**(log_ec50 + (1/hill_slope)*np.log10(25/75))
+            
+            if obs_max < 25.0:
+                status = "⚠️ Low (<25%)" # Calc is done, but warned
+            elif r2_4pl < 0.9:
+                status = "⚠️ Poor Fit"
+            else:
+                status = "✅ Pass"
 
-        return popt, ec25, ec50, ec90, r2_4pl, status
+            return popt, ec25, ec50, ec90, r2_4pl, max_val, status
 
     except Exception as e:
-        return None, None, None, None, None, f"Fit Failed"
+        return None, "NA", "NA", "NA", "NA", 0, f"Fit Failed"
 
 # ==========================================
 #        GOOGLE DRIVE CONNECTOR
@@ -183,10 +187,8 @@ if app_mode == "Standardized Protocol (IgE/SP)":
                 name = st.text_input(f"Donor {i+1} Name", f"Donor_{i+1}")
                 donors.append({"name": name, "color": colors[i], "ige_cols": [], "sp_cols": []})
 
-    # --- TEMPLATE & UPLOAD ---
     st.write("---")
     
-    # Updated Template with Specific Doses
     template_data = """Dose_IgE,Dose_SP,IgE_Sample_1,IgE_Sample_2,SP_Sample_1,SP_Sample_2
 1,3.5,45.0,42.0,55.0,50.0
 0.5,2.5,40.0,38.0,50.0,45.0
@@ -228,7 +230,6 @@ if app_mode == "Standardized Protocol (IgE/SP)":
                     d['ige_cols'] = ca.multiselect(f"Anti-IgE Samples ({d['name']})", available_cols, key=f"ige_{d['name']}")
                     d['sp_cols'] = cb.multiselect(f"SP Samples ({d['name']})", available_cols, key=f"sp_{d['name']}")
 
-            # --- PLOTTING FUNCTION ---
             def plot_std_category(df, dose_col, donor_list, cat_name, unit):
                 fig_log = go.Figure()
                 fig_lin = go.Figure()
@@ -243,14 +244,15 @@ if app_mode == "Standardized Protocol (IgE/SP)":
                     
                     for col in target_cols:
                         resp = df[col]
-                        popt, ec25, ec50, ec90, r2, status = calculate_metrics(doses, resp)
+                        popt, ec25, ec50, ec90, r2, max_val, status = calculate_metrics(doses, resp)
                         
-                        if popt is not None:
+                        # ALWAYS ADD TO TABLE (Even if Linear/NA)
+                        if status != "Not enough data" and status != "Fit Failed":
                             res.append({
                                 "Date": str(test_date), "Donor": d['name'], 
                                 "Stimulant": cat_name, "Sample": col, 
                                 "EC25": ec25, "EC50": ec50, "EC90": ec90, 
-                                "Max": popt[1], "R²": r2, "Status": status
+                                "Max": max_val, "R²": r2, "Status": status
                             })
                             
                             d_plot = pd.to_numeric(doses.astype(str).str.replace(',', '.'), errors='coerce')
@@ -261,37 +263,35 @@ if app_mode == "Standardized Protocol (IgE/SP)":
                             y_plot = r_plot[mask]
                             if max(y_plot) <= 1.0: y_plot = y_plot * 100
                             
-                            # TRACES
+                            # PLOT DOTS (Always)
                             fig_log.add_trace(go.Scatter(x=x_plot_raw, y=y_plot, mode='markers', marker=dict(color=d['color']), showlegend=False))
                             fig_lin.add_trace(go.Scatter(x=x_plot_raw, y=y_plot, mode='markers', marker=dict(color=d['color']), showlegend=False))
                             
-                            # FIT LINES
-                            x_smooth_log = np.logspace(np.log10(min(x_plot_raw)), np.log10(max(x_plot_raw)), 100)
-                            y_smooth_log = four_param_logistic(np.log10(x_smooth_log), *popt)
-                            
-                            x_smooth_lin = np.linspace(min(x_plot_raw), max(x_plot_raw), 100)
-                            y_smooth_lin = four_param_logistic(np.log10(x_smooth_lin), *popt)
-                            
-                            legend_name = f"{d['name']} {cat_name}"
-                            
-                            fig_log.add_trace(go.Scatter(
-                                x=x_smooth_log, y=y_smooth_log, mode='lines', name=legend_name, 
-                                line=dict(color=d['color']), showlegend=show_legend_for_donor, legendgroup=d['name']
-                            ))
-                            
-                            fig_lin.add_trace(go.Scatter(
-                                x=x_smooth_lin, y=y_smooth_lin, mode='lines', name=legend_name, 
-                                line=dict(color=d['color']), showlegend=False, legendgroup=d['name']
-                            ))
-                            
-                            show_legend_for_donor = False
+                            # PLOT LINE (Only if popt exists/Sigmoidal)
+                            if popt is not None:
+                                x_smooth_log = np.logspace(np.log10(min(x_plot_raw)), np.log10(max(x_plot_raw)), 100)
+                                y_smooth_log = four_param_logistic(np.log10(x_smooth_log), *popt)
+                                
+                                x_smooth_lin = np.linspace(min(x_plot_raw), max(x_plot_raw), 100)
+                                y_smooth_lin = four_param_logistic(np.log10(x_smooth_lin), *popt)
+                                
+                                legend_name = f"{d['name']} {cat_name}"
+                                
+                                fig_log.add_trace(go.Scatter(
+                                    x=x_smooth_log, y=y_smooth_log, mode='lines', name=legend_name, 
+                                    line=dict(color=d['color']), showlegend=show_legend_for_donor, legendgroup=d['name']
+                                ))
+                                fig_lin.add_trace(go.Scatter(
+                                    x=x_smooth_lin, y=y_smooth_lin, mode='lines', name=legend_name, 
+                                    line=dict(color=d['color']), showlegend=False, legendgroup=d['name']
+                                ))
+                                show_legend_for_donor = False
                 
                 fig_log.update_layout(title=f"{cat_name} (Log Scale)", xaxis_title=f"Dose ({unit})", yaxis_title="Degranulation %", xaxis_type="log", height=450)
                 fig_lin.update_layout(title=f"{cat_name} (Linear Scale)", xaxis_title=f"Dose ({unit})", yaxis_title="Degranulation %", xaxis_type="linear", height=450)
                 
                 return pd.DataFrame(res), fig_log, fig_lin
 
-            # --- RUN BUTTON ---
             if st.button("🚀 Run Standard Analysis"):
                 r_ige, f_ige_log, f_ige_lin = plot_std_category(df, col_ige_dose, donors, "Anti-IgE", "µg/mL")
                 r_sp, f_sp_log, f_sp_lin = plot_std_category(df, col_sp_dose, donors, "SP", "µM")
@@ -302,10 +302,8 @@ if app_mode == "Standardized Protocol (IgE/SP)":
                     'raw_link': raw_link, 'test_date': test_date
                 }
 
-            # --- DISPLAY & EXPORT ---
             if 'std_results' in st.session_state:
                 res = st.session_state['std_results']
-                
                 st.markdown("### 📊 Results")
                 
                 st.subheader("Anti-IgE Results")
@@ -326,7 +324,6 @@ if app_mode == "Standardized Protocol (IgE/SP)":
                 with c4: 
                     st.dataframe(res['r_sp'], height=600)
 
-                # HTML Report
                 html = f"""
                 <html>
                 <head>
@@ -398,13 +395,13 @@ elif app_mode == "Custom Experiment (Flexible)":
 
                     for sample in selected_samples:
                         responses = df_c[sample]
-                        popt, ec25, ec50, ec90, r2, status = calculate_metrics(doses, responses)
+                        popt, ec25, ec50, ec90, r2, max_val, status = calculate_metrics(doses, responses)
                         
-                        if popt is not None:
+                        if status != "Not enough data" and status != "Fit Failed":
                             results_c.append({
                                 "Date": str(date.today()), "Sample": sample, 
                                 "EC25": ec25, "EC50": ec50, "EC90": ec90, 
-                                "Max Response": popt[1], "R²": r2, "Status": status
+                                "Max Response": max_val, "R²": r2, "Status": status
                             })
                             d_plot = pd.to_numeric(doses.astype(str).str.replace(',', '.'), errors='coerce')
                             r_plot = pd.to_numeric(responses.astype(str).str.replace(',', '.').str.replace('%', ''), errors='coerce')
@@ -416,13 +413,14 @@ elif app_mode == "Custom Experiment (Flexible)":
                             fig_log.add_trace(go.Scatter(x=x_plot_raw, y=y_plot, mode='markers', name=sample))
                             fig_lin.add_trace(go.Scatter(x=x_plot_raw, y=y_plot, mode='markers', name=sample))
                             
-                            x_smooth_log = np.logspace(np.log10(min(x_plot_raw)), np.log10(max(x_plot_raw)), 100)
-                            y_smooth_log = four_param_logistic(np.log10(x_smooth_log), *popt)
-                            fig_log.add_trace(go.Scatter(x=x_smooth_log, y=y_smooth_log, mode='lines', name=f"{sample} Fit"))
-                            
-                            x_smooth_lin = np.linspace(min(x_plot_raw), max(x_plot_raw), 100)
-                            y_smooth_lin = four_param_logistic(np.log10(x_smooth_lin), *popt)
-                            fig_lin.add_trace(go.Scatter(x=x_smooth_lin, y=y_smooth_lin, mode='lines', name=f"{sample} Fit"))
+                            if popt is not None:
+                                x_smooth_log = np.logspace(np.log10(min(x_plot_raw)), np.log10(max(x_plot_raw)), 100)
+                                y_smooth_log = four_param_logistic(np.log10(x_smooth_log), *popt)
+                                fig_log.add_trace(go.Scatter(x=x_smooth_log, y=y_smooth_log, mode='lines', name=f"{sample} Fit"))
+                                
+                                x_smooth_lin = np.linspace(min(x_plot_raw), max(x_plot_raw), 100)
+                                y_smooth_lin = four_param_logistic(np.log10(x_smooth_lin), *popt)
+                                fig_lin.add_trace(go.Scatter(x=x_smooth_lin, y=y_smooth_lin, mode='lines', name=f"{sample} Fit"))
                         else:
                             results_c.append({"Sample": sample, "Status": status})
                     
