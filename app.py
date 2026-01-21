@@ -15,7 +15,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # ==========================================
-#        SHARED MATH ENGINE (Bio-Stabilized)
+#        SHARED MATH ENGINE
 # ==========================================
 
 def four_param_logistic(x, min_val, max_val, log_ec50, hill_slope):
@@ -24,7 +24,7 @@ def four_param_logistic(x, min_val, max_val, log_ec50, hill_slope):
 
 def calculate_aic(n, rss, k):
     """Calculate Akaike Information Criterion (AIC)."""
-    if rss <= 0: return np.inf
+    if rss <= 0: return -np.inf # If perfect fit, AIC is very low (good)
     return n * np.log(rss / n) + 2 * k
 
 def get_r_squared(y_true, y_pred):
@@ -39,10 +39,9 @@ def get_r_squared(y_true, y_pred):
 
 def calculate_metrics(doses, responses):
     """
-    Strict QC Logic:
-    1. Linear vs 4PL (AIC Check)
-    2. Max Response < 25% Check
-    Returns 'NA' for invalid calculations.
+    Refined Logic:
+    - Favor Linear if AIC is similar (Occam's Razor).
+    - If Max is huge (>150%), force Linear (Incomplete).
     """
     try:
         # 1. DATA PREP
@@ -67,9 +66,10 @@ def calculate_metrics(doses, responses):
         # --- MODEL 1: 4PL (Sigmoidal) ---
         min_log = min(x_log)
         max_log = max(x_log)
+        # Bounds: Max can float up to 200% to test for runaway curves
         bounds = (
             [-0.001,        obs_max,       min_log - 1.0,  0.1], 
-            [ 0.001,        150,           max_log + 1.0,  10.0] 
+            [ 0.001,        200,           max_log + 1.0,  10.0] 
         )
         p0 = [0, obs_max, np.median(x_log), 1.0]
         
@@ -79,9 +79,11 @@ def calculate_metrics(doses, responses):
             rss_4pl = np.sum((y_clean - y_pred_4pl)**2)
             aic_4pl = calculate_aic(len(y_clean), rss_4pl, 4)
             r2_4pl = get_r_squared(y_clean, y_pred_4pl)
+            calc_max = popt[1]
         except:
             popt = None
             aic_4pl = np.inf
+            calc_max = 999
 
         # --- MODEL 2: Linear Regression ---
         slope, intercept, r_value, _, _ = linregress(x_log, y_clean)
@@ -91,30 +93,34 @@ def calculate_metrics(doses, responses):
 
         # --- DECISION TREE ---
         
-        # 1. Is it Linear? (AIC_lin < AIC_4pl - 2)
-        is_linear = aic_lin < (aic_4pl - 2) or popt is None
+        # Condition A: Runaway Curve? (Calculated Max > 150%)
+        # Condition B: Linear is better or similar? (Allow Linear to win even if slightly worse AIC, +2 buffer)
+        # Condition C: 4PL Failed?
+        
+        force_linear = calc_max > 150.0 
+        better_linear = aic_lin < (aic_4pl + 2.0) # +2 favors simpler model
+        
+        is_linear = force_linear or better_linear or popt is None
         
         if is_linear:
-            # LINEAR LOGIC:
-            # "Do not generate any EC and R2 calculation, just show NA"
-            # "Show the maximum of degranulation" (Observed Max)
+            # STATUS MSG
             if obs_max < 25.0:
                 status = "⚠️ Low (<25%) + Linear"
             else:
                 status = "⚠️ Linear Trend"
             
-            # Return None for popt (no curve), NA for metrics, obs_max for Max
+            # Return NA for metrics, Observed Max for 'Max'
             return None, "NA", "NA", "NA", "NA", obs_max, status
 
         else:
-            # SIGMOIDAL LOGIC:
+            # SIGMOIDAL ACCEPTED
             min_val, max_val, log_ec50, hill_slope = popt
             ec50 = 10**log_ec50
             ec90 = 10**(log_ec50 + (1/hill_slope)*np.log10(90/10))
             ec25 = 10**(log_ec50 + (1/hill_slope)*np.log10(25/75))
             
             if obs_max < 25.0:
-                status = "⚠️ Low (<25%)" # Calc is done, but warned
+                status = "⚠️ Low (<25%)" # Valid curve, just low
             elif r2_4pl < 0.9:
                 status = "⚠️ Poor Fit"
             else:
@@ -165,9 +171,6 @@ app_mode = st.sidebar.radio("Choose Analysis Type:",
 
 st.sidebar.divider()
 
-# ==========================================
-#   MODE 1: STANDARDIZED PROTOCOL
-# ==========================================
 if app_mode == "Standardized Protocol (IgE/SP)":
     st.title("🧬 Mast Cell Multi-Donor Analyzer")
 
@@ -221,7 +224,6 @@ if app_mode == "Standardized Protocol (IgE/SP)":
             df.columns = df.columns.str.strip()
 
             st.info("👇 Assign columns to each donor")
-            available_cols = [c for c in df.columns if c not in [col_ige_dose, col_sp_dose]]
             
             for d in donors:
                 with st.container():
@@ -246,7 +248,6 @@ if app_mode == "Standardized Protocol (IgE/SP)":
                         resp = df[col]
                         popt, ec25, ec50, ec90, r2, max_val, status = calculate_metrics(doses, resp)
                         
-                        # ALWAYS ADD TO TABLE (Even if Linear/NA)
                         if status != "Not enough data" and status != "Fit Failed":
                             res.append({
                                 "Date": str(test_date), "Donor": d['name'], 
@@ -258,16 +259,13 @@ if app_mode == "Standardized Protocol (IgE/SP)":
                             d_plot = pd.to_numeric(doses.astype(str).str.replace(',', '.'), errors='coerce')
                             r_plot = pd.to_numeric(resp.astype(str).str.replace(',', '.').str.replace('%', ''), errors='coerce')
                             mask = ~np.isnan(d_plot) & ~np.isnan(r_plot) & (d_plot > 0)
-                            
                             x_plot_raw = d_plot[mask]
                             y_plot = r_plot[mask]
                             if max(y_plot) <= 1.0: y_plot = y_plot * 100
                             
-                            # PLOT DOTS (Always)
                             fig_log.add_trace(go.Scatter(x=x_plot_raw, y=y_plot, mode='markers', marker=dict(color=d['color']), showlegend=False))
                             fig_lin.add_trace(go.Scatter(x=x_plot_raw, y=y_plot, mode='markers', marker=dict(color=d['color']), showlegend=False))
                             
-                            # PLOT LINE (Only if popt exists/Sigmoidal)
                             if popt is not None:
                                 x_smooth_log = np.logspace(np.log10(min(x_plot_raw)), np.log10(max(x_plot_raw)), 100)
                                 y_smooth_log = four_param_logistic(np.log10(x_smooth_log), *popt)
@@ -276,31 +274,18 @@ if app_mode == "Standardized Protocol (IgE/SP)":
                                 y_smooth_lin = four_param_logistic(np.log10(x_smooth_lin), *popt)
                                 
                                 legend_name = f"{d['name']} {cat_name}"
-                                
-                                fig_log.add_trace(go.Scatter(
-                                    x=x_smooth_log, y=y_smooth_log, mode='lines', name=legend_name, 
-                                    line=dict(color=d['color']), showlegend=show_legend_for_donor, legendgroup=d['name']
-                                ))
-                                fig_lin.add_trace(go.Scatter(
-                                    x=x_smooth_lin, y=y_smooth_lin, mode='lines', name=legend_name, 
-                                    line=dict(color=d['color']), showlegend=False, legendgroup=d['name']
-                                ))
+                                fig_log.add_trace(go.Scatter(x=x_smooth_log, y=y_smooth_log, mode='lines', name=legend_name, line=dict(color=d['color']), showlegend=show_legend_for_donor, legendgroup=d['name']))
+                                fig_lin.add_trace(go.Scatter(x=x_smooth_lin, y=y_smooth_lin, mode='lines', name=legend_name, line=dict(color=d['color']), showlegend=False, legendgroup=d['name']))
                                 show_legend_for_donor = False
                 
                 fig_log.update_layout(title=f"{cat_name} (Log Scale)", xaxis_title=f"Dose ({unit})", yaxis_title="Degranulation %", xaxis_type="log", height=450)
                 fig_lin.update_layout(title=f"{cat_name} (Linear Scale)", xaxis_title=f"Dose ({unit})", yaxis_title="Degranulation %", xaxis_type="linear", height=450)
-                
                 return pd.DataFrame(res), fig_log, fig_lin
 
             if st.button("🚀 Run Standard Analysis"):
                 r_ige, f_ige_log, f_ige_lin = plot_std_category(df, col_ige_dose, donors, "Anti-IgE", "µg/mL")
                 r_sp, f_sp_log, f_sp_lin = plot_std_category(df, col_sp_dose, donors, "SP", "µM")
-                
-                st.session_state['std_results'] = {
-                    'r_ige': r_ige, 'f_ige_log': f_ige_log, 'f_ige_lin': f_ige_lin,
-                    'r_sp': r_sp, 'f_sp_log': f_sp_log, 'f_sp_lin': f_sp_lin,
-                    'raw_link': raw_link, 'test_date': test_date
-                }
+                st.session_state['std_results'] = {'r_ige': r_ige, 'f_ige_log': f_ige_log, 'f_ige_lin': f_ige_lin, 'r_sp': r_sp, 'f_sp_log': f_sp_log, 'f_sp_lin': f_sp_lin, 'raw_link': raw_link, 'test_date': test_date}
 
             if 'std_results' in st.session_state:
                 res = st.session_state['std_results']
@@ -311,8 +296,7 @@ if app_mode == "Standardized Protocol (IgE/SP)":
                 with c1: 
                     st.plotly_chart(res['f_ige_log'], use_container_width=True)
                     st.plotly_chart(res['f_ige_lin'], use_container_width=True)
-                with c2: 
-                    st.dataframe(res['r_ige'], height=600)
+                with c2: st.dataframe(res['r_ige'], height=600)
 
                 st.divider()
 
@@ -321,36 +305,9 @@ if app_mode == "Standardized Protocol (IgE/SP)":
                 with c3: 
                     st.plotly_chart(res['f_sp_log'], use_container_width=True)
                     st.plotly_chart(res['f_sp_lin'], use_container_width=True)
-                with c4: 
-                    st.dataframe(res['r_sp'], height=600)
+                with c4: st.dataframe(res['r_sp'], height=600)
 
-                html = f"""
-                <html>
-                <head>
-                    <title>Mast Cell Report</title>
-                    <style>
-                        .plot-row {{ display: flex; flex-direction: row; width: 100%; }}
-                        .plot-col {{ width: 50%; padding: 5px; }}
-                    </style>
-                </head>
-                <body>
-                    <h1>Mast Cell Report ({res['test_date']})</h1>
-                    <h2>Anti-IgE</h2>
-                    {res['r_ige'].to_html()}
-                    <div class="plot-row">
-                        <div class="plot-col">{res['f_ige_log'].to_html(full_html=False, include_plotlyjs='cdn')}</div>
-                        <div class="plot-col">{res['f_ige_lin'].to_html(full_html=False, include_plotlyjs='cdn')}</div>
-                    </div>
-                    <hr>
-                    <h2>SP</h2>
-                    {res['r_sp'].to_html()}
-                    <div class="plot-row">
-                        <div class="plot-col">{res['f_sp_log'].to_html(full_html=False, include_plotlyjs='cdn')}</div>
-                        <div class="plot-col">{res['f_sp_lin'].to_html(full_html=False, include_plotlyjs='cdn')}</div>
-                    </div>
-                </body>
-                </html>
-                """
+                html = f"""<html><head><title>Mast Cell Report</title><style>.plot-row {{ display: flex; flex-direction: row; width: 100%; }} .plot-col {{ width: 50%; padding: 5px; }}</style></head><body><h1>Mast Cell Report ({res['test_date']})</h1><h2>Anti-IgE</h2>{res['r_ige'].to_html()}<div class="plot-row"><div class="plot-col">{res['f_ige_log'].to_html(full_html=False, include_plotlyjs='cdn')}</div><div class="plot-col">{res['f_ige_lin'].to_html(full_html=False, include_plotlyjs='cdn')}</div></div><hr><h2>SP</h2>{res['r_sp'].to_html()}<div class="plot-row"><div class="plot-col">{res['f_sp_log'].to_html(full_html=False, include_plotlyjs='cdn')}</div><div class="plot-col">{res['f_sp_lin'].to_html(full_html=False, include_plotlyjs='cdn')}</div></div></body></html>"""
                 b64 = base64.b64encode(html.encode()).decode()
                 st.markdown(f'<a href="data:text/html;base64,{b64}" download="Mast_Cell_Report_{res["test_date"]}.html" style="text-decoration:none;">📥 <b>Download Interactive HTML Report</b></a>', unsafe_allow_html=True)
 
@@ -365,9 +322,6 @@ if app_mode == "Standardized Protocol (IgE/SP)":
 
         except Exception as e: st.error(f"Error: {e}")
 
-# ==========================================
-#   MODE 2: CUSTOM EXPERIMENT
-# ==========================================
 elif app_mode == "Custom Experiment (Flexible)":
     st.title("🧪 Custom Dose-Response Playground")
     custom_file = st.file_uploader("Upload Any Data", type=['csv', 'xlsx'], key="custom")
@@ -387,7 +341,6 @@ elif app_mode == "Custom Experiment (Flexible)":
 
             if selected_samples:
                 if st.button("Run Custom Analysis") or ('custom_results' in st.session_state):
-                    
                     results_c = []
                     fig_log = go.Figure()
                     fig_lin = go.Figure()
@@ -435,19 +388,7 @@ elif app_mode == "Custom Experiment (Flexible)":
                         fig_lin.update_layout(title="Linear Scale", xaxis_title=f"Dose ({unit_label})", yaxis_title="Response %", xaxis_type="linear", height=400)
                         st.plotly_chart(fig_lin, use_container_width=True)
 
-                    html_c = f"""
-                    <html>
-                    <head><style>.row {{ display: flex; }} .col {{ width: 50%; }}</style></head>
-                    <body>
-                        <h1>Custom Analysis Report</h1>
-                        {res_df_c.to_html()}
-                        <div class="row">
-                            <div class="col">{fig_log.to_html(full_html=False, include_plotlyjs='cdn')}</div>
-                            <div class="col">{fig_lin.to_html(full_html=False, include_plotlyjs='cdn')}</div>
-                        </div>
-                    </body>
-                    </html>
-                    """
+                    html_c = f"""<html><head><style>.row {{ display: flex; }} .col {{ width: 50%; }}</style></head><body><h1>Custom Analysis Report</h1>{res_df_c.to_html()}<div class="row"><div class="col">{fig_log.to_html(full_html=False, include_plotlyjs='cdn')}</div><div class="col">{fig_lin.to_html(full_html=False, include_plotlyjs='cdn')}</div></div></body></html>"""
                     b64_c = base64.b64encode(html_c.encode()).decode()
                     st.markdown(f'<a href="data:text/html;base64,{b64_c}" download="Custom_Report.html">📥 <b>Download Custom HTML Report</b></a>', unsafe_allow_html=True)
 
