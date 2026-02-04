@@ -40,8 +40,8 @@ def get_r_squared(y_true, y_pred):
 def calculate_metrics(doses, responses):
     """
     Refined Logic:
-    - Favor Linear if AIC is similar (Occam's Razor).
-    - If Max is huge (>150%), force Linear (Incomplete).
+    - Favor Linear if AIC is similar.
+    - If Linear: Return 'absolute_max' (highest dot), not calculated max.
     """
     try:
         # 1. DATA PREP
@@ -61,16 +61,18 @@ def calculate_metrics(doses, responses):
         if max(y_clean) <= 1.0: y_clean = y_clean * 100
         x_log = np.log10(x_raw)
         
-        obs_max = max(y_clean)
+        # DEFINITION: Absolute Max is the highest actual data point
+        absolute_max = max(y_clean)
         
         # --- MODEL 1: 4PL (Sigmoidal) ---
         min_log = min(x_log)
         max_log = max(x_log)
+        
         bounds = (
-            [-0.001,        obs_max,       min_log - 1.0,  0.1], 
+            [-0.001,        absolute_max,  min_log - 1.0,  0.1], 
             [ 0.001,        200,           max_log + 1.0,  10.0] 
         )
-        p0 = [0, obs_max, np.median(x_log), 1.0]
+        p0 = [0, absolute_max, np.median(x_log), 1.0]
         
         try:
             popt, _ = curve_fit(four_param_logistic, x_log, y_clean, p0, bounds=bounds, maxfev=10000)
@@ -97,11 +99,13 @@ def calculate_metrics(doses, responses):
         is_linear = force_linear or better_linear or popt is None
         
         if is_linear:
-            if obs_max < 25.0:
+            if absolute_max < 25.0:
                 status = "⚠️ Low (<25%) + Linear"
             else:
                 status = "⚠️ Linear Trend"
-            return None, "NA", "NA", "NA", "NA", obs_max, status
+            
+            # Export ABSOLUTE MAX (Actual Data), NA for calculated metrics
+            return None, "NA", "NA", "NA", "NA", absolute_max, status
 
         else:
             min_val, max_val, log_ec50, hill_slope = popt
@@ -109,13 +113,14 @@ def calculate_metrics(doses, responses):
             ec90 = 10**(log_ec50 + (1/hill_slope)*np.log10(90/10))
             ec25 = 10**(log_ec50 + (1/hill_slope)*np.log10(25/75))
             
-            if obs_max < 25.0:
+            if absolute_max < 25.0:
                 status = "⚠️ Low (<25%)" 
             elif r2_4pl < 0.9:
                 status = "⚠️ Poor Fit"
             else:
                 status = "✅ Pass"
 
+            # Export CALCULATED MAX (max_val) for valid curves
             return popt, ec25, ec50, ec90, r2_4pl, max_val, status
 
     except Exception as e:
@@ -213,9 +218,7 @@ if app_mode == "Standardized Protocol (IgE/SP)":
             else: df = pd.read_excel(uploaded_file)
             df.columns = df.columns.str.strip()
 
-            # --- RESTORED THE MISSING LINE BELOW ---
             available_cols = [c for c in df.columns if c not in [col_ige_dose, col_sp_dose]]
-            # ---------------------------------------
 
             st.info("👇 Assign columns to each donor")
             
