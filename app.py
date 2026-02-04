@@ -39,9 +39,9 @@ def get_r_squared(y_true, y_pred):
 
 def calculate_metrics(doses, responses):
     """
-    Refined Logic:
-    - Favor Linear if AIC is similar.
-    - If Linear: Return 'absolute_max' (highest dot), not calculated max.
+    Refined Logic with Dynamic Ceiling:
+    - If Obs Max < 25%, Clamp the calculated Top to 35% max.
+    - This prevents 'Ghost Plateaus' (e.g. predicting 50% when data stops at 18%).
     """
     try:
         # 1. DATA PREP
@@ -61,16 +61,23 @@ def calculate_metrics(doses, responses):
         if max(y_clean) <= 1.0: y_clean = y_clean * 100
         x_log = np.log10(x_raw)
         
-        # DEFINITION: Absolute Max is the highest actual data point
         absolute_max = max(y_clean)
         
+        # --- DYNAMIC CEILING (The Fix) ---
+        # If data is low (<25%), force the Top to be low (<35%).
+        # Otherwise, allow it to float high (up to 200%).
+        if absolute_max < 25.0:
+            top_ceiling = 35.0
+        else:
+            top_ceiling = 150.0
+
         # --- MODEL 1: 4PL (Sigmoidal) ---
         min_log = min(x_log)
         max_log = max(x_log)
         
         bounds = (
-            [-0.001,        absolute_max,  min_log - 1.0,  0.1], 
-            [ 0.001,        200,           max_log + 1.0,  10.0] 
+            [-0.001,        absolute_max,  min_log - 1.0,  0.1],   # Lower Bounds
+            [ 0.001,        top_ceiling,   max_log + 1.0,  10.0]   # Upper Bounds (Clamped)
         )
         p0 = [0, absolute_max, np.median(x_log), 1.0]
         
@@ -93,10 +100,13 @@ def calculate_metrics(doses, responses):
         aic_lin = calculate_aic(len(y_clean), rss_lin, 2)
 
         # --- DECISION TREE ---
-        force_linear = calc_max > 150.0 
-        better_linear = aic_lin < (aic_4pl + 2.0) 
+        # 1. Did the S-Curve hit the ceiling? (Runaway curve)
+        hit_ceiling = calc_max > (top_ceiling - 1.0)
         
-        is_linear = force_linear or better_linear or popt is None
+        # 2. Is Linear better? (Allow linear to win if AIC is close)
+        better_linear = aic_lin < (aic_4pl + 2.0)
+        
+        is_linear = hit_ceiling or better_linear or popt is None
         
         if is_linear:
             if absolute_max < 25.0:
@@ -104,7 +114,6 @@ def calculate_metrics(doses, responses):
             else:
                 status = "⚠️ Linear Trend"
             
-            # Export ABSOLUTE MAX (Actual Data), NA for calculated metrics
             return None, "NA", "NA", "NA", "NA", absolute_max, status
 
         else:
@@ -120,7 +129,6 @@ def calculate_metrics(doses, responses):
             else:
                 status = "✅ Pass"
 
-            # Export CALCULATED MAX (max_val) for valid curves
             return popt, ec25, ec50, ec90, r2_4pl, max_val, status
 
     except Exception as e:
