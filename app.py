@@ -39,9 +39,7 @@ def get_r_squared(y_true, y_pred):
 
 def calculate_metrics(doses, responses):
     """
-    Refined Logic with Dynamic Ceiling:
-    - If Obs Max < 25%, Clamp the calculated Top to 35% max.
-    - This prevents 'Ghost Plateaus' (e.g. predicting 50% when data stops at 18%).
+    Refined Logic with Dynamic Ceiling + EC75 Addition.
     """
     try:
         # 1. DATA PREP
@@ -57,27 +55,26 @@ def calculate_metrics(doses, responses):
         x_raw = doses[mask]
         y_clean = responses[mask]
         
-        if len(y_clean) < 4: return None, "NA", "NA", "NA", "NA", 0, "Not enough data"
+        # Note: Return tuple now has 8 items (added EC75)
+        if len(y_clean) < 4: return None, "NA", "NA", "NA", "NA", "NA", 0, "Not enough data"
         if max(y_clean) <= 1.0: y_clean = y_clean * 100
         x_log = np.log10(x_raw)
         
         absolute_max = max(y_clean)
         
-        # --- DYNAMIC CEILING (The Fix) ---
-        # If data is low (<25%), force the Top to be low (<35%).
-        # Otherwise, allow it to float high (up to 200%).
+        # --- DYNAMIC CEILING ---
         if absolute_max < 25.0:
             top_ceiling = 35.0
         else:
-            top_ceiling = 150.0
+            top_ceiling = 200.0
 
         # --- MODEL 1: 4PL (Sigmoidal) ---
         min_log = min(x_log)
         max_log = max(x_log)
         
         bounds = (
-            [-0.001,        absolute_max,  min_log - 1.0,  0.1],   # Lower Bounds
-            [ 0.001,        top_ceiling,   max_log + 1.0,  10.0]   # Upper Bounds (Clamped)
+            [-0.001,        absolute_max,  min_log - 1.0,  0.1], 
+            [ 0.001,        top_ceiling,   max_log + 1.0,  10.0] 
         )
         p0 = [0, absolute_max, np.median(x_log), 1.0]
         
@@ -100,10 +97,7 @@ def calculate_metrics(doses, responses):
         aic_lin = calculate_aic(len(y_clean), rss_lin, 2)
 
         # --- DECISION TREE ---
-        # 1. Did the S-Curve hit the ceiling? (Runaway curve)
         hit_ceiling = calc_max > (top_ceiling - 1.0)
-        
-        # 2. Is Linear better? (Allow linear to win if AIC is close)
         better_linear = aic_lin < (aic_4pl + 2.0)
         
         is_linear = hit_ceiling or better_linear or popt is None
@@ -113,13 +107,16 @@ def calculate_metrics(doses, responses):
                 status = "⚠️ Low (<25%) + Linear"
             else:
                 status = "⚠️ Linear Trend"
-            
-            return None, "NA", "NA", "NA", "NA", absolute_max, status
+            # Return NA for all ECs (25, 50, 75, 90)
+            return None, "NA", "NA", "NA", "NA", "NA", absolute_max, status
 
         else:
             min_val, max_val, log_ec50, hill_slope = popt
+            
+            # --- CALCULATE EC VALUES ---
             ec50 = 10**log_ec50
             ec90 = 10**(log_ec50 + (1/hill_slope)*np.log10(90/10))
+            ec75 = 10**(log_ec50 + (1/hill_slope)*np.log10(75/25)) # Added EC75
             ec25 = 10**(log_ec50 + (1/hill_slope)*np.log10(25/75))
             
             if absolute_max < 25.0:
@@ -129,10 +126,10 @@ def calculate_metrics(doses, responses):
             else:
                 status = "✅ Pass"
 
-            return popt, ec25, ec50, ec90, r2_4pl, max_val, status
+            return popt, ec25, ec50, ec75, ec90, r2_4pl, max_val, status
 
     except Exception as e:
-        return None, "NA", "NA", "NA", "NA", 0, f"Fit Failed"
+        return None, "NA", "NA", "NA", "NA", "NA", 0, f"Fit Failed"
 
 # ==========================================
 #        GOOGLE DRIVE CONNECTOR
@@ -251,13 +248,14 @@ if app_mode == "Standardized Protocol (IgE/SP)":
                     
                     for col in target_cols:
                         resp = df[col]
-                        popt, ec25, ec50, ec90, r2, max_val, status = calculate_metrics(doses, resp)
+                        # Unpack 8 values now
+                        popt, ec25, ec50, ec75, ec90, r2, max_val, status = calculate_metrics(doses, resp)
                         
                         if status != "Not enough data" and status != "Fit Failed":
                             res.append({
                                 "Date": str(test_date), "Donor": d['name'], 
                                 "Stimulant": cat_name, "Sample": col, 
-                                "EC25": ec25, "EC50": ec50, "EC90": ec90, 
+                                "EC25": ec25, "EC50": ec50, "EC75": ec75, "EC90": ec90, 
                                 "Max": max_val, "R²": r2, "Status": status
                             })
                             
@@ -312,9 +310,59 @@ if app_mode == "Standardized Protocol (IgE/SP)":
                     st.plotly_chart(res['f_sp_lin'], use_container_width=True)
                 with c4: st.dataframe(res['r_sp'], height=600)
 
-                html = f"""<html><head><title>Mast Cell Report</title><style>.plot-row {{ display: flex; flex-direction: row; width: 100%; }} .plot-col {{ width: 50%; padding: 5px; }}</style></head><body><h1>Mast Cell Report ({res['test_date']})</h1><h2>Anti-IgE</h2>{res['r_ige'].to_html()}<div class="plot-row"><div class="plot-col">{res['f_ige_log'].to_html(full_html=False, include_plotlyjs='cdn')}</div><div class="plot-col">{res['f_ige_lin'].to_html(full_html=False, include_plotlyjs='cdn')}</div></div><hr><h2>SP</h2>{res['r_sp'].to_html()}<div class="plot-row"><div class="plot-col">{res['f_sp_log'].to_html(full_html=False, include_plotlyjs='cdn')}</div><div class="plot-col">{res['f_sp_lin'].to_html(full_html=False, include_plotlyjs='cdn')}</div></div></body></html>"""
+                # --- LANDSCAPE HTML TEMPLATE ---
+                html = f"""
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <title>Mast Cell Report</title>
+                    <style>
+                        @page {{
+                            size: landscape;
+                            margin: 1cm;
+                        }}
+                        body {{ font-family: sans-serif; -webkit-print-color-adjust: exact; }}
+                        .container {{ width: 100%; display: flex; flex-wrap: wrap; page-break-inside: avoid; }}
+                        .plot-col {{ width: 49%; padding: 5px; }}
+                        .table-container {{ width: 100%; margin-top: 20px; page-break-inside: avoid; }}
+                        h2 {{ border-bottom: 2px solid #ccc; padding-bottom: 5px; }}
+                        table {{ width: 100%; border-collapse: collapse; font-size: 12px; }}
+                        th, td {{ border: 1px solid #ddd; padding: 6px; text-align: left; }}
+                        th {{ background-color: #f2f2f2; }}
+                        @media print {{
+                            .no-print {{ display: none; }}
+                        }}
+                    </style>
+                </head>
+                <body>
+                    <h1>Mast Cell Report ({res['test_date']})</h1>
+                    <p class="no-print" style="color:red; font-weight:bold;">👉 Press Ctrl+P (or Cmd+P) and choose "Save as PDF". Ensure Layout is set to "Landscape".</p>
+                    
+                    <h2>Anti-IgE Analysis</h2>
+                    <div class="table-container">
+                        {res['r_ige'].to_html(index=False)}
+                    </div>
+                    <div class="container">
+                        <div class="plot-col">{res['f_ige_log'].to_html(full_html=False, include_plotlyjs='cdn')}</div>
+                        <div class="plot-col">{res['f_ige_lin'].to_html(full_html=False, include_plotlyjs='cdn')}</div>
+                    </div>
+                    
+                    <div style="page-break-before: always;"></div>
+                    
+                    <h2>SP Analysis</h2>
+                    <div class="table-container">
+                        {res['r_sp'].to_html(index=False)}
+                    </div>
+                    <div class="container">
+                        <div class="plot-col">{res['f_sp_log'].to_html(full_html=False, include_plotlyjs='cdn')}</div>
+                        <div class="plot-col">{res['f_sp_lin'].to_html(full_html=False, include_plotlyjs='cdn')}</div>
+                    </div>
+                </body>
+                </html>
+                """
                 b64 = base64.b64encode(html.encode()).decode()
-                st.markdown(f'<a href="data:text/html;base64,{b64}" download="Mast_Cell_Report_{res["test_date"]}.html" style="text-decoration:none;">📥 <b>Download Interactive HTML Report</b></a>', unsafe_allow_html=True)
+                st.markdown(f'<a href="data:text/html;base64,{b64}" download="Mast_Cell_Report_Landscape.html" style="background-color:#FF4B4B;color:white;padding:10px 20px;text-decoration:none;border-radius:5px;font-weight:bold;">📥 Download Report (Print to PDF)</a>', unsafe_allow_html=True)
+                st.caption("ℹ️ To get a PDF: Download this file, open it in your browser, and select 'Print' -> 'Save as PDF'. The layout is pre-set to Horizontal/Landscape.")
 
                 st.divider()
                 st.subheader("☁️ Database")
@@ -353,12 +401,13 @@ elif app_mode == "Custom Experiment (Flexible)":
 
                     for sample in selected_samples:
                         responses = df_c[sample]
-                        popt, ec25, ec50, ec90, r2, max_val, status = calculate_metrics(doses, responses)
+                        # Unpack 8 values
+                        popt, ec25, ec50, ec75, ec90, r2, max_val, status = calculate_metrics(doses, responses)
                         
                         if status != "Not enough data" and status != "Fit Failed":
                             results_c.append({
                                 "Date": str(date.today()), "Sample": sample, 
-                                "EC25": ec25, "EC50": ec50, "EC90": ec90, 
+                                "EC25": ec25, "EC50": ec50, "EC75": ec75, "EC90": ec90, 
                                 "Max Response": max_val, "R²": r2, "Status": status
                             })
                             d_plot = pd.to_numeric(doses.astype(str).str.replace(',', '.'), errors='coerce')
@@ -393,9 +442,33 @@ elif app_mode == "Custom Experiment (Flexible)":
                         fig_lin.update_layout(title="Linear Scale", xaxis_title=f"Dose ({unit_label})", yaxis_title="Response %", xaxis_type="linear", height=400)
                         st.plotly_chart(fig_lin, use_container_width=True)
 
-                    html_c = f"""<html><head><style>.row {{ display: flex; }} .col {{ width: 50%; }}</style></head><body><h1>Custom Analysis Report</h1>{res_df_c.to_html()}<div class="row"><div class="col">{fig_log.to_html(full_html=False, include_plotlyjs='cdn')}</div><div class="col">{fig_lin.to_html(full_html=False, include_plotlyjs='cdn')}</div></div></body></html>"""
+                    html_c = f"""
+                    <!DOCTYPE html>
+                    <html>
+                    <head>
+                        <style>
+                            @page {{ size: landscape; margin: 1cm; }}
+                            body {{ font-family: sans-serif; }}
+                            .container {{ width: 100%; display: flex; flex-wrap: wrap; }}
+                            .plot-col {{ width: 49%; padding: 5px; }}
+                            .table-container {{ width: 100%; margin-top: 20px; }}
+                            table {{ width: 100%; border-collapse: collapse; }}
+                            th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+                        </style>
+                    </head>
+                    <body>
+                        <h1>Custom Analysis Report</h1>
+                        <p class="no-print" style="color:red;">👉 Press Ctrl+P -> Save as PDF (Landscape).</p>
+                        <div class="table-container">{res_df_c.to_html(index=False)}</div>
+                        <div class="container">
+                            <div class="plot-col">{fig_log.to_html(full_html=False, include_plotlyjs='cdn')}</div>
+                            <div class="plot-col">{fig_lin.to_html(full_html=False, include_plotlyjs='cdn')}</div>
+                        </div>
+                    </body>
+                    </html>
+                    """
                     b64_c = base64.b64encode(html_c.encode()).decode()
-                    st.markdown(f'<a href="data:text/html;base64,{b64_c}" download="Custom_Report.html">📥 <b>Download Custom HTML Report</b></a>', unsafe_allow_html=True)
+                    st.markdown(f'<a href="data:text/html;base64,{b64_c}" download="Custom_Report_Landscape.html" style="background-color:#FF4B4B;color:white;padding:10px 20px;text-decoration:none;border-radius:5px;font-weight:bold;">📥 Download Report (Print to PDF)</a>', unsafe_allow_html=True)
 
                     st.divider()
                     if st.button("💾 Save Custom Results to Drive"):
