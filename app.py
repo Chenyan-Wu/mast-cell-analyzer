@@ -39,7 +39,8 @@ def get_r_squared(y_true, y_pred):
 
 def calculate_metrics(doses, responses):
     """
-    Refined Logic with Dynamic Ceiling + EC75 Addition.
+    Refined Logic with Dynamic Ceiling.
+    Returns: popt, ec25, ec50, ec90, r2, max_val, status
     """
     try:
         # 1. DATA PREP
@@ -55,8 +56,8 @@ def calculate_metrics(doses, responses):
         x_raw = doses[mask]
         y_clean = responses[mask]
         
-        # Note: Return tuple now has 8 items (added EC75)
-        if len(y_clean) < 4: return None, "NA", "NA", "NA", "NA", "NA", 0, "Not enough data"
+        # Note: Return tuple has 7 items
+        if len(y_clean) < 4: return None, "NA", "NA", "NA", "NA", 0, "Not enough data"
         if max(y_clean) <= 1.0: y_clean = y_clean * 100
         x_log = np.log10(x_raw)
         
@@ -107,16 +108,14 @@ def calculate_metrics(doses, responses):
                 status = "⚠️ Low (<25%) + Linear"
             else:
                 status = "⚠️ Linear Trend"
-            # Return NA for all ECs (25, 50, 75, 90)
-            return None, "NA", "NA", "NA", "NA", "NA", absolute_max, status
+            # Return NA for ECs
+            return None, "NA", "NA", "NA", "NA", absolute_max, status
 
         else:
             min_val, max_val, log_ec50, hill_slope = popt
             
-            # --- CALCULATE EC VALUES ---
             ec50 = 10**log_ec50
             ec90 = 10**(log_ec50 + (1/hill_slope)*np.log10(90/10))
-            ec75 = 10**(log_ec50 + (1/hill_slope)*np.log10(75/25)) # Added EC75
             ec25 = 10**(log_ec50 + (1/hill_slope)*np.log10(25/75))
             
             if absolute_max < 25.0:
@@ -126,10 +125,10 @@ def calculate_metrics(doses, responses):
             else:
                 status = "✅ Pass"
 
-            return popt, ec25, ec50, ec75, ec90, r2_4pl, max_val, status
+            return popt, ec25, ec50, ec90, r2_4pl, max_val, status
 
     except Exception as e:
-        return None, "NA", "NA", "NA", "NA", "NA", 0, f"Fit Failed"
+        return None, "NA", "NA", "NA", "NA", 0, f"Fit Failed"
 
 # ==========================================
 #        GOOGLE DRIVE CONNECTOR
@@ -248,14 +247,14 @@ if app_mode == "Standardized Protocol (IgE/SP)":
                     
                     for col in target_cols:
                         resp = df[col]
-                        # Unpack 8 values now
-                        popt, ec25, ec50, ec75, ec90, r2, max_val, status = calculate_metrics(doses, resp)
+                        # Removed EC75
+                        popt, ec25, ec50, ec90, r2, max_val, status = calculate_metrics(doses, resp)
                         
                         if status != "Not enough data" and status != "Fit Failed":
                             res.append({
                                 "Date": str(test_date), "Donor": d['name'], 
                                 "Stimulant": cat_name, "Sample": col, 
-                                "EC25": ec25, "EC50": ec50, "EC75": ec75, "EC90": ec90, 
+                                "EC25": ec25, "EC50": ec50, "EC90": ec90, 
                                 "Max": max_val, "R²": r2, "Status": status
                             })
                             
@@ -401,13 +400,13 @@ elif app_mode == "Custom Experiment (Flexible)":
 
                     for sample in selected_samples:
                         responses = df_c[sample]
-                        # Unpack 8 values
-                        popt, ec25, ec50, ec75, ec90, r2, max_val, status = calculate_metrics(doses, responses)
+                        # Removed EC75
+                        popt, ec25, ec50, ec90, r2, max_val, status = calculate_metrics(doses, responses)
                         
                         if status != "Not enough data" and status != "Fit Failed":
                             results_c.append({
                                 "Date": str(date.today()), "Sample": sample, 
-                                "EC25": ec25, "EC50": ec50, "EC75": ec75, "EC90": ec90, 
+                                "EC25": ec25, "EC50": ec50, "EC90": ec90, 
                                 "Max Response": max_val, "R²": r2, "Status": status
                             })
                             d_plot = pd.to_numeric(doses.astype(str).str.replace(',', '.'), errors='coerce')
