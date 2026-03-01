@@ -39,8 +39,8 @@ def get_r_squared(y_true, y_pred):
 
 def calculate_metrics(doses, responses):
     """
-    Refined Logic with Dynamic Ceiling.
-    Returns: popt, ec25, ec50, ec90, r2, max_val, status
+    Refined Logic with Prism-Matched Initial Guessing & Dynamic Ceiling.
+    Auto-scaling (x100) has been removed to preserve true low values.
     """
     try:
         # 1. DATA PREP
@@ -53,12 +53,11 @@ def calculate_metrics(doses, responses):
         responses = pd.to_numeric(responses, errors='coerce')
         
         mask = (doses > 0) & ~np.isnan(doses) & ~np.isnan(responses)
-        x_raw = doses[mask]
-        y_clean = responses[mask]
+        x_raw = doses[mask].reset_index(drop=True)
+        y_clean = responses[mask].reset_index(drop=True)
         
-        # Note: Return tuple has 7 items
         if len(y_clean) < 4: return None, "NA", "NA", "NA", "NA", 0, "Not enough data"
-        if max(y_clean) <= 1.0: y_clean = y_clean * 100
+        # REMOVED: if max(y_clean) <= 1.0: y_clean = y_clean * 100
         x_log = np.log10(x_raw)
         
         absolute_max = max(y_clean)
@@ -77,10 +76,19 @@ def calculate_metrics(doses, responses):
             [-0.001,        absolute_max,  min_log - 1.0,  0.1], 
             [ 0.001,        top_ceiling,   max_log + 1.0,  10.0] 
         )
-        p0 = [0, absolute_max, np.median(x_log), 1.0]
+        
+        # PRISM-MATCHED INITIAL GUESS
+        half_max_y = absolute_max / 2.0
+        idx_closest_to_half = (np.abs(y_clean - half_max_y)).argmin()
+        guess_log_ec50 = x_log[idx_closest_to_half]
+        
+        p0 = [0, absolute_max, guess_log_ec50, 1.0]
         
         try:
-            popt, _ = curve_fit(four_param_logistic, x_log, y_clean, p0, bounds=bounds, maxfev=10000)
+            popt, _ = curve_fit(
+                four_param_logistic, x_log, y_clean, p0, 
+                bounds=bounds, maxfev=10000, ftol=1e-8, xtol=1e-8
+            )
             y_pred_4pl = four_param_logistic(x_log, *popt)
             rss_4pl = np.sum((y_clean - y_pred_4pl)**2)
             aic_4pl = calculate_aic(len(y_clean), rss_4pl, 4)
@@ -108,7 +116,6 @@ def calculate_metrics(doses, responses):
                 status = "⚠️ Low (<25%) + Linear"
             else:
                 status = "⚠️ Linear Trend"
-            # Return NA for ECs
             return None, "NA", "NA", "NA", "NA", absolute_max, status
 
         else:
@@ -247,7 +254,6 @@ if app_mode == "Standardized Protocol (IgE/SP)":
                     
                     for col in target_cols:
                         resp = df[col]
-                        # Removed EC75
                         popt, ec25, ec50, ec90, r2, max_val, status = calculate_metrics(doses, resp)
                         
                         if status != "Not enough data" and status != "Fit Failed":
@@ -263,7 +269,7 @@ if app_mode == "Standardized Protocol (IgE/SP)":
                             mask = ~np.isnan(d_plot) & ~np.isnan(r_plot) & (d_plot > 0)
                             x_plot_raw = d_plot[mask]
                             y_plot = r_plot[mask]
-                            if max(y_plot) <= 1.0: y_plot = y_plot * 100
+                            # REMOVED: if max(y_plot) <= 1.0: y_plot = y_plot * 100
                             
                             fig_log.add_trace(go.Scatter(x=x_plot_raw, y=y_plot, mode='markers', marker=dict(color=d['color']), showlegend=False))
                             fig_lin.add_trace(go.Scatter(x=x_plot_raw, y=y_plot, mode='markers', marker=dict(color=d['color']), showlegend=False))
@@ -309,7 +315,6 @@ if app_mode == "Standardized Protocol (IgE/SP)":
                     st.plotly_chart(res['f_sp_lin'], use_container_width=True)
                 with c4: st.dataframe(res['r_sp'], height=600)
 
-                # --- LANDSCAPE HTML TEMPLATE ---
                 html = f"""
                 <!DOCTYPE html>
                 <html>
@@ -400,7 +405,6 @@ elif app_mode == "Custom Experiment (Flexible)":
 
                     for sample in selected_samples:
                         responses = df_c[sample]
-                        # Removed EC75
                         popt, ec25, ec50, ec90, r2, max_val, status = calculate_metrics(doses, responses)
                         
                         if status != "Not enough data" and status != "Fit Failed":
@@ -414,7 +418,7 @@ elif app_mode == "Custom Experiment (Flexible)":
                             mask = ~np.isnan(d_plot) & ~np.isnan(r_plot) & (d_plot > 0)
                             x_plot_raw = d_plot[mask]
                             y_plot = r_plot[mask]
-                            if max(y_plot) <= 1.0: y_plot = y_plot * 100
+                            # REMOVED: if max(y_plot) <= 1.0: y_plot = y_plot * 100
 
                             fig_log.add_trace(go.Scatter(x=x_plot_raw, y=y_plot, mode='markers', name=sample))
                             fig_lin.add_trace(go.Scatter(x=x_plot_raw, y=y_plot, mode='markers', name=sample))
