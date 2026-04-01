@@ -39,8 +39,9 @@ def get_r_squared(y_true, y_pred):
 
 def calculate_metrics(doses, responses, multiply_by_100=False):
     """
-    Refined Logic with Dynamic Ceiling.
-    Includes user-controlled toggle for converting fractions to percentages.
+    Refined Logic:
+    - Strict Failure Threshold lowered to 20% (Clamps ceiling).
+    - 20-25% generates curve but gives warning.
     """
     try:
         # 1. DATA PREP
@@ -58,16 +59,15 @@ def calculate_metrics(doses, responses, multiply_by_100=False):
         
         if len(y_clean) < 4: return None, "NA", "NA", "NA", "NA", 0, "Not enough data"
         
-        # APPLY TOGGLE: User controls if 0.55 should become 55.0
+        # APPLY TOGGLE
         if multiply_by_100:
             y_clean = y_clean * 100.0
 
         x_log = np.log10(x_raw)
-        
         absolute_max = max(y_clean)
         
-        # --- DYNAMIC CEILING ---
-        if absolute_max < 25.0:
+        # --- DYNAMIC CEILING (Updated to 20%) ---
+        if absolute_max < 20.0:
             top_ceiling = 35.0
         else:
             top_ceiling = 200.0
@@ -97,7 +97,7 @@ def calculate_metrics(doses, responses, multiply_by_100=False):
             rss_4pl = np.sum((y_clean - y_pred_4pl)**2)
             aic_4pl = calculate_aic(len(y_clean), rss_4pl, 4)
             r2_4pl = get_r_squared(y_clean, y_pred_4pl)
-            calc_max = popt[1]
+            calc_max = popt[1] 
         except:
             popt = None
             aic_4pl = np.inf
@@ -116,8 +116,10 @@ def calculate_metrics(doses, responses, multiply_by_100=False):
         is_linear = hit_ceiling or better_linear or popt is None
         
         if is_linear:
-            if absolute_max < 25.0:
-                status = "⚠️ Low (<25%) + Linear"
+            if absolute_max < 20.0:
+                status = "⚠️ Low (<20%) + Linear"
+            elif absolute_max < 25.0:
+                status = "⚠️ Linear (Max < 25%)"
             else:
                 status = "⚠️ Linear Trend"
             return None, "NA", "NA", "NA", "NA", absolute_max, status
@@ -129,14 +131,20 @@ def calculate_metrics(doses, responses, multiply_by_100=False):
             ec90 = 10**(log_ec50 + (1/hill_slope)*np.log10(90/10))
             ec25 = 10**(log_ec50 + (1/hill_slope)*np.log10(25/75))
             
-            if absolute_max < 25.0:
-                status = "⚠️ Low (<25%)" 
+            # --- STATUS UPDATED ---
+            if absolute_max < 20.0:
+                status = "⚠️ Low (<20%)" 
+            elif absolute_max < 25.0:
+                if r2_4pl < 0.9:
+                    status = "⚠️ Poor Fit (<25%)"
+                else:
+                    status = "⚠️ Max < 25%"
             elif r2_4pl < 0.9:
                 status = "⚠️ Poor Fit"
             else:
                 status = "✅ Pass"
 
-            return popt, ec25, ec50, ec90, r2_4pl, max_val, status
+            return popt, ec25, ec50, ec90, r2_4pl, absolute_max, status
 
     except Exception as e:
         return None, "NA", "NA", "NA", "NA", 0, f"Fit Failed"
@@ -202,7 +210,6 @@ if app_mode == "Standardized Protocol (IgE/SP)":
 
     st.write("---")
     
-    # Updated Template with correct SP Doses
     template_data = """Dose_IgE,Dose_SP,IgE_Sample_1,IgE_Sample_2,SP_Sample_1,SP_Sample_2
 1,10,45.0,42.0,55.0,50.0
 0.5,5,40.0,38.0,50.0,45.0
@@ -276,14 +283,14 @@ if app_mode == "Standardized Protocol (IgE/SP)":
                     
                     for col in target_cols:
                         resp = df[col]
-                        popt, ec25, ec50, ec90, r2, max_val, status = calculate_metrics(doses, resp, mult_100)
+                        popt, ec25, ec50, ec90, r2, absolute_max_val, status = calculate_metrics(doses, resp, mult_100)
                         
                         if status != "Not enough data" and status != "Fit Failed":
                             res.append({
                                 "Date": str(test_date), "Donor": d['name'], 
                                 "Stimulant": cat_name, "Sample": col, 
                                 "EC25": ec25, "EC50": ec50, "EC90": ec90, 
-                                "Max": max_val, "R²": r2, "Status": status
+                                "Max": absolute_max_val, "R²": r2, "Status": status
                             })
                             
                             d_plot = pd.to_numeric(doses.astype(str).str.replace(',', '.'), errors='coerce')
@@ -292,7 +299,6 @@ if app_mode == "Standardized Protocol (IgE/SP)":
                             x_plot_raw = d_plot[mask]
                             y_plot = r_plot[mask]
                             
-                            # Apply plot scaling to match the logic
                             if mult_100: y_plot = y_plot * 100.0
                             
                             fig_log.add_trace(go.Scatter(x=x_plot_raw, y=y_plot, mode='markers', marker=dict(color=d['color']), showlegend=False))
@@ -339,7 +345,6 @@ if app_mode == "Standardized Protocol (IgE/SP)":
                     st.plotly_chart(res['f_sp_lin'], use_container_width=True)
                 with c4: st.dataframe(res['r_sp'], height=600)
 
-                # --- LANDSCAPE HTML TEMPLATE ---
                 html = f"""
                 <!DOCTYPE html>
                 <html>
@@ -443,13 +448,13 @@ elif app_mode == "Custom Experiment (Flexible)":
 
                     for sample in selected_samples:
                         responses = df_c[sample]
-                        popt, ec25, ec50, ec90, r2, max_val, status = calculate_metrics(doses, responses, multiply_toggle_c)
+                        popt, ec25, ec50, ec90, r2, absolute_max_val, status = calculate_metrics(doses, responses, multiply_toggle_c)
                         
                         if status != "Not enough data" and status != "Fit Failed":
                             results_c.append({
                                 "Date": str(date.today()), "Sample": sample, 
                                 "EC25": ec25, "EC50": ec50, "EC90": ec90, 
-                                "Max Response": max_val, "R²": r2, "Status": status
+                                "Max Response": absolute_max_val, "R²": r2, "Status": status
                             })
                             d_plot = pd.to_numeric(doses.astype(str).str.replace(',', '.'), errors='coerce')
                             r_plot = pd.to_numeric(responses.astype(str).str.replace(',', '.').str.replace('%', ''), errors='coerce')
