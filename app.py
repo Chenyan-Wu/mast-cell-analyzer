@@ -37,10 +37,10 @@ def get_r_squared(y_true, y_pred):
     except:
         return 0
 
-def calculate_metrics(doses, responses):
+def calculate_metrics(doses, responses, multiply_by_100=False):
     """
-    Refined Logic with Prism-Matched Initial Guessing & Dynamic Ceiling.
-    Auto-scaling (x100) has been removed to preserve true low values.
+    Refined Logic with Dynamic Ceiling.
+    Includes user-controlled toggle for converting fractions to percentages.
     """
     try:
         # 1. DATA PREP
@@ -57,7 +57,11 @@ def calculate_metrics(doses, responses):
         y_clean = responses[mask].reset_index(drop=True)
         
         if len(y_clean) < 4: return None, "NA", "NA", "NA", "NA", 0, "Not enough data"
-        # REMOVED: if max(y_clean) <= 1.0: y_clean = y_clean * 100
+        
+        # APPLY TOGGLE: User controls if 0.55 should become 55.0
+        if multiply_by_100:
+            y_clean = y_clean * 100.0
+
         x_log = np.log10(x_raw)
         
         absolute_max = max(y_clean)
@@ -198,17 +202,18 @@ if app_mode == "Standardized Protocol (IgE/SP)":
 
     st.write("---")
     
+    # Updated Template with correct SP Doses
     template_data = """Dose_IgE,Dose_SP,IgE_Sample_1,IgE_Sample_2,SP_Sample_1,SP_Sample_2
-1,3.5,45.0,42.0,55.0,50.0
-0.5,2.5,40.0,38.0,50.0,45.0
-0.1,1.5,35.0,30.0,45.0,40.0
-0.05,1,25.0,22.0,35.0,30.0
-0.01,0.75,15.0,12.0,25.0,20.0
-0.0075,0.5,10.0,8.0,15.0,12.0
-0.005,0.3,5.0,4.0,10.0,8.0
-0.0025,0.15,2.0,1.0,5.0,4.0
-0.001,0.075,1.0,0.5,2.0,1.0
-,0.05,,,1.0,0.5"""
+1,10,45.0,42.0,55.0,50.0
+0.5,5,40.0,38.0,50.0,45.0
+0.1,2.5,35.0,30.0,45.0,40.0
+0.05,1.25,25.0,22.0,35.0,30.0
+0.01,0.625,15.0,12.0,25.0,20.0
+0.0075,0.3125,10.0,8.0,15.0,12.0
+0.005,0.15625,5.0,4.0,10.0,8.0
+0.0025,0.078125,2.0,1.0,5.0,4.0
+0.001,0.0390625,1.0,0.5,2.0,1.0
+,0.01953125,,,1.0,0.5"""
     
     st.download_button(
         label="📥 Download Template CSV",
@@ -231,6 +236,23 @@ if app_mode == "Standardized Protocol (IgE/SP)":
 
             available_cols = [c for c in df.columns if c not in [col_ige_dose, col_sp_dose]]
 
+            # --- AUTO-DETECT DATA SCALE ---
+            global_max = 0
+            for c in available_cols:
+                m = pd.to_numeric(df[c].astype(str).str.replace(',', '.').str.replace('%', ''), errors='coerce').max()
+                if pd.notna(m) and m > global_max:
+                    global_max = m
+            
+            is_fraction = (0 < global_max <= 2.0)
+            
+            st.write("---")
+            st.subheader("⚙️ Data Processing Options")
+            multiply_toggle = st.checkbox("🔄 Convert Fractions to Percentages (x100)", value=is_fraction, help="Automatically converts decimals (0.58) to percentages (58.0)")
+            
+            if is_fraction:
+                st.info(f"💡 **Auto-Detected Decimal Format:** The highest value in your file is **{global_max:.4f}**. We automatically checked the box to convert your data to percentages. If your max response truly is {global_max:.4f}%, please uncheck the box.")
+
+            st.write("---")
             st.info("👇 Assign columns to each donor")
             
             for d in donors:
@@ -240,7 +262,7 @@ if app_mode == "Standardized Protocol (IgE/SP)":
                     d['ige_cols'] = ca.multiselect(f"Anti-IgE Samples ({d['name']})", available_cols, key=f"ige_{d['name']}")
                     d['sp_cols'] = cb.multiselect(f"SP Samples ({d['name']})", available_cols, key=f"sp_{d['name']}")
 
-            def plot_std_category(df, dose_col, donor_list, cat_name, unit):
+            def plot_std_category(df, dose_col, donor_list, cat_name, unit, mult_100):
                 fig_log = go.Figure()
                 fig_lin = go.Figure()
                 res = []
@@ -254,7 +276,7 @@ if app_mode == "Standardized Protocol (IgE/SP)":
                     
                     for col in target_cols:
                         resp = df[col]
-                        popt, ec25, ec50, ec90, r2, max_val, status = calculate_metrics(doses, resp)
+                        popt, ec25, ec50, ec90, r2, max_val, status = calculate_metrics(doses, resp, mult_100)
                         
                         if status != "Not enough data" and status != "Fit Failed":
                             res.append({
@@ -269,7 +291,9 @@ if app_mode == "Standardized Protocol (IgE/SP)":
                             mask = ~np.isnan(d_plot) & ~np.isnan(r_plot) & (d_plot > 0)
                             x_plot_raw = d_plot[mask]
                             y_plot = r_plot[mask]
-                            # REMOVED: if max(y_plot) <= 1.0: y_plot = y_plot * 100
+                            
+                            # Apply plot scaling to match the logic
+                            if mult_100: y_plot = y_plot * 100.0
                             
                             fig_log.add_trace(go.Scatter(x=x_plot_raw, y=y_plot, mode='markers', marker=dict(color=d['color']), showlegend=False))
                             fig_lin.add_trace(go.Scatter(x=x_plot_raw, y=y_plot, mode='markers', marker=dict(color=d['color']), showlegend=False))
@@ -291,8 +315,8 @@ if app_mode == "Standardized Protocol (IgE/SP)":
                 return pd.DataFrame(res), fig_log, fig_lin
 
             if st.button("🚀 Run Standard Analysis"):
-                r_ige, f_ige_log, f_ige_lin = plot_std_category(df, col_ige_dose, donors, "Anti-IgE", "µg/mL")
-                r_sp, f_sp_log, f_sp_lin = plot_std_category(df, col_sp_dose, donors, "SP", "µM")
+                r_ige, f_ige_log, f_ige_lin = plot_std_category(df, col_ige_dose, donors, "Anti-IgE", "µg/mL", multiply_toggle)
+                r_sp, f_sp_log, f_sp_lin = plot_std_category(df, col_sp_dose, donors, "SP", "µM", multiply_toggle)
                 st.session_state['std_results'] = {'r_ige': r_ige, 'f_ige_log': f_ige_log, 'f_ige_lin': f_ige_lin, 'r_sp': r_sp, 'f_sp_log': f_sp_log, 'f_sp_lin': f_sp_lin, 'raw_link': raw_link, 'test_date': test_date}
 
             if 'std_results' in st.session_state:
@@ -315,6 +339,7 @@ if app_mode == "Standardized Protocol (IgE/SP)":
                     st.plotly_chart(res['f_sp_lin'], use_container_width=True)
                 with c4: st.dataframe(res['r_sp'], height=600)
 
+                # --- LANDSCAPE HTML TEMPLATE ---
                 html = f"""
                 <!DOCTYPE html>
                 <html>
@@ -397,6 +422,19 @@ elif app_mode == "Custom Experiment (Flexible)":
             selected_samples = st.multiselect("Select Y-columns", available, default=available[:2])
 
             if selected_samples:
+                
+                # Auto-Detect for Custom Mode
+                global_max_c = 0
+                for c in selected_samples:
+                    m = pd.to_numeric(df_c[c].astype(str).str.replace(',', '.').str.replace('%', ''), errors='coerce').max()
+                    if pd.notna(m) and m > global_max_c:
+                        global_max_c = m
+                is_fraction_c = (0 < global_max_c <= 2.0)
+                
+                multiply_toggle_c = st.checkbox("🔄 Convert Fractions to Percentages (x100)", value=is_fraction_c)
+                if is_fraction_c:
+                    st.info(f"💡 Auto-Detected Decimal Format. Global max is {global_max_c:.4f}. Box checked automatically.")
+                
                 if st.button("Run Custom Analysis") or ('custom_results' in st.session_state):
                     results_c = []
                     fig_log = go.Figure()
@@ -405,7 +443,7 @@ elif app_mode == "Custom Experiment (Flexible)":
 
                     for sample in selected_samples:
                         responses = df_c[sample]
-                        popt, ec25, ec50, ec90, r2, max_val, status = calculate_metrics(doses, responses)
+                        popt, ec25, ec50, ec90, r2, max_val, status = calculate_metrics(doses, responses, multiply_toggle_c)
                         
                         if status != "Not enough data" and status != "Fit Failed":
                             results_c.append({
@@ -418,7 +456,8 @@ elif app_mode == "Custom Experiment (Flexible)":
                             mask = ~np.isnan(d_plot) & ~np.isnan(r_plot) & (d_plot > 0)
                             x_plot_raw = d_plot[mask]
                             y_plot = r_plot[mask]
-                            # REMOVED: if max(y_plot) <= 1.0: y_plot = y_plot * 100
+                            
+                            if multiply_toggle_c: y_plot = y_plot * 100.0
 
                             fig_log.add_trace(go.Scatter(x=x_plot_raw, y=y_plot, mode='markers', name=sample))
                             fig_lin.add_trace(go.Scatter(x=x_plot_raw, y=y_plot, mode='markers', name=sample))
