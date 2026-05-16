@@ -11,6 +11,8 @@ from scipy.stats import linregress
 import plotly.graph_objects as go
 from datetime import date
 import base64
+import io
+import sqlite3
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
@@ -178,6 +180,25 @@ def save_to_google_sheet(df, sheet_name="MastCell_DB"):
         return True, "Success"
     except Exception as e:
         return False, str(e)
+
+def save_to_local_db(df, table_name="mastcell_results", db_path="mastcell_results.db"):
+    """Append results to a local SQLite database for retrospective analysis."""
+    try:
+        with sqlite3.connect(db_path) as conn:
+            df.to_sql(table_name, conn, if_exists="append", index=False)
+        return True, db_path
+    except Exception as e:
+        return False, str(e)
+
+def build_qc_export(results_df, raw_link, test_date, stimulant_label):
+    """Create a QC-ready table with core fields used downstream."""
+    qc = results_df.copy()
+    qc["QC_Date"] = str(test_date)
+    qc["Raw_Data_Link"] = raw_link
+    qc["Assay_Type"] = stimulant_label
+    ordered_cols = ["QC_Date", "Donor", "Assay_Type", "Stimulant", "Sample", "EC25", "EC50", "EC90", "Max", "R²", "Status", "Raw_Data_Link"]
+    existing = [c for c in ordered_cols if c in qc.columns]
+    return qc[existing]
 
 # ==========================================
 #        APP NAVIGATION
@@ -406,6 +427,28 @@ if app_mode == "Standardized Protocol (IgE/SP)":
                     success, msg = save_to_google_sheet(full_db, "MastCell_DB")
                     if success: st.success(f"✅ Saved {len(full_db)} rows to Google Drive!")
                     else: st.error(f"❌ Error: {msg}")
+
+                st.subheader("🧩 One-Run QC + Archive")
+                full_db = pd.concat([res['r_ige'], res['r_sp']], ignore_index=True)
+                full_db["Raw_Link"] = res["raw_link"]
+
+                c_qc1, c_qc2 = st.columns(2)
+                with c_qc1:
+                    qc_df = build_qc_export(full_db, res["raw_link"], res["test_date"], "Standardized Protocol")
+                    csv_bytes = qc_df.to_csv(index=False).encode("utf-8")
+                    st.download_button(
+                        "📥 Download QC CSV (Donor + ECxx + Max + Status)",
+                        data=csv_bytes,
+                        file_name=f"QC_{res['test_date']}.csv",
+                        mime="text/csv"
+                    )
+                with c_qc2:
+                    if st.button("🗄️ Archive to Local SQLite (.db)"):
+                        ok, out = save_to_local_db(full_db, table_name="standardized_runs")
+                        if ok:
+                            st.success(f"✅ Saved to local database: {out}")
+                        else:
+                            st.error(f"❌ Could not save to local DB: {out}")
 
         except Exception as e: st.error(f"Error: {e}")
 
